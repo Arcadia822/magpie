@@ -5210,13 +5210,13 @@ function accountPlan(a) {
 // dev UI falls back to it. A tab on `magpie web` reached over plain http
 // from another computer (a NAS's) has no clipboard API at all, so the
 // older copy command is the last try there.
-async function copy(text, what, btn, message) {
+async function copy(text, what, btn, message, failure) {
   const done = () => { status(message || t("{what} copied", { what }), "ok"); flashCopied(btn); };
   const res = await fetch("/api/copy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) }).catch(() => null);
   if (res && res.ok) return done();
   try { await navigator.clipboard.writeText(text); return done(); } catch {}
   if (copyByCommand(text)) return done();
-  status(text);
+  status(failure || text, failure ? "err" : undefined);
 }
 
 // copyByCommand copies text with the page's copy command, through a
@@ -20731,7 +20731,7 @@ async function show(v) {
     slide($("#nav"), "nav"); navInSight();
   }
   $("#prefs").classList.toggle("on", v === "settings");
-  for (const id of ["agents", "providers", "gateway", "routing", "usage", "sessions", "library", "plugins", "settings"]) $("#view-" + id).hidden = v !== id;
+  for (const id of ["agents", "providers", "gateway", "routing", "usage", "sessions", "analytics", "library", "plugins", "settings"]) $("#view-" + id).hidden = v !== id;
   // back to where the reader was in it, and again once it has what it loads
   const back = () => backToReader($("#view-" + v));
   requestAnimationFrame(back);
@@ -20745,6 +20745,10 @@ async function show(v) {
   if (v === "library") window.loadLibrary?.()?.then(back);
   if (v === "plugins") window.loadPlugins?.()?.then(back);
   if (v === "sessions") window.loadSessionsPage?.()?.then(back);
+  if (v === "analytics") {
+    const p = typeof period === "string" ? period : "30d";
+    window.loadAnalytics?.(p)?.then?.(back) || back();
+  }
   syncTitle();
   syncURL();
   return true;
@@ -20781,6 +20785,7 @@ function openSettings() {
   show("settings");
 }
 $("#prefs").onclick = () => { openSettings(); $("#prefs").blur(); };
+$("#openAnalytics")?.addEventListener("click", () => { show("analytics"); $("#openAnalytics")?.blur(); });
 
 // The header's refresh reads again what the page shown draws (#844): on
 // Agents it looks for the agents on this computer again (one just installed
@@ -21165,7 +21170,7 @@ window.noteAccounts = noteAccounts;
   }
   // what a page redraws is masked before it's painted; masking isn't
   // itself watched, so it can't set itself off again
-  const OBS = { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["title"] };
+  const OBS = { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["title", "aria-label"] };
   const SKIP = new Set(["SCRIPT", "STYLE", "OPTION", "TEXTAREA"]);
   // chosen is the Hide accounts choice made on this computer; until one is,
   // the accounts are hidden while Privacy masks personal data, which is
@@ -21175,7 +21180,7 @@ window.noteAccounts = noteAccounts;
   try { chosen = localStorage.getItem("magpie.maskEmails"); masked = chosen === "1"; } catch {}
   // the pages it hides on: Routing's and Usage's, each with its button; in
   // the tray panel, the whole of it, as the window's setting says
-  const targets = mode === "panel" ? [["#view-agents", null]] : [["#view-routing", "#rtMask"], ["#view-usage", "#usageMask"]];
+  const targets = mode === "panel" ? [["#view-agents", null]] : [["#view-routing", "#rtMask"], ["#view-usage", "#usageMask"], ["#view-analytics", null]];
   const pages = targets.map(([v, b]) => {
     const view = $(v), btn = b && $(b);
     if (!view) return () => {};
@@ -21204,17 +21209,22 @@ window.noteAccounts = noteAccounts;
         if (bits.length > 1) { const run = el("span", "pii-run"); run.append(...bits); n.replaceWith(run); }
         else n.replaceWith(...bits);
       }
-      for (const e of view.querySelectorAll("[title]")) {
-        // one masked already reads as an account too, its stars and all
-        if ("piiTitle" in e.dataset || !e.title) continue;
-        let out = "", last = 0;
-        for (const m of hits(e.title, re)) {
-          out += e.title.slice(last, m.index) + m[0].replace(m[0].includes("@") ? /[^@.]/g : /./gu, "•"); // a tooltip can't blur
-          last = m.index + m[0].length;
+      for (const [attr, prop] of [["title", "piiTitle"], ["aria-label", "piiAriaLabel"]]) {
+        for (const e of view.querySelectorAll("[" + attr + "]")) {
+          // one masked already reads as an account too, its stars and all
+          if (prop in e.dataset) continue;
+          const val = e.getAttribute(attr);
+          if (!val) continue;
+          let out = "", last = 0;
+          for (const m of hits(val, re)) {
+            out += val.slice(last, m.index) + m[0].replace(m[0].includes("@") ? /[^@.]/g : /./gu, "•"); // a tooltip can't blur
+            last = m.index + m[0].length;
+          }
+          if (!last) continue;
+          e.dataset[prop] = val;
+          e.setAttribute(attr, out + val.slice(last));
+          if (attr === "title") e.title = out + val.slice(last);
         }
-        if (!last) continue;
-        e.dataset.piiTitle = e.title;
-        e.title = out + e.title.slice(last);
       }
     }
     function unmask() {
@@ -21222,6 +21232,7 @@ window.noteAccounts = noteAccounts;
       for (const r of view.querySelectorAll(".pii-run")) r.replaceWith(r.textContent);
       view.normalize();
       for (const e of view.querySelectorAll("[data-pii-title]")) { e.title = e.dataset.piiTitle; delete e.dataset.piiTitle; }
+      for (const e of view.querySelectorAll("[data-pii-aria-label]")) { e.setAttribute("aria-label", e.dataset.piiAriaLabel); delete e.dataset.piiAriaLabel; }
     }
     const watch = new MutationObserver(() => {
       if (!masked) return;
@@ -21305,7 +21316,7 @@ if (mode === "window" && params.get("view") === "usage") {
   for (const k of ["tab", "provider", "agent", "computer", "card", "purpose", "via"]) u.searchParams.delete(k);
   history.replaceState(null, "", u);
 }
-if (mode === "window" && ["providers", "gateway", "routing", "usage", "sessions", "library", "plugins", "settings"].includes(params.get("view"))) show(params.get("view"));
+if (mode === "window" && ["providers", "gateway", "routing", "usage", "sessions", "analytics", "library", "plugins", "settings"].includes(params.get("view"))) show(params.get("view"));
 else if (mode === "window" && !gatewayMode) slide($("#nav"), "nav");
 // in gateway mode the first page is Providers, Agents' tab gone
 if (gatewayMode) setGatewayMode(true);
