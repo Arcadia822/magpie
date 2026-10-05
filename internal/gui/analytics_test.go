@@ -22,7 +22,7 @@ func TestAnalyticsRoutes(t *testing.T) {
 		ID:   "testprov",
 		Name: "TestProv",
 		Chat: "https://test.example/v1",
-		Key: "synthetic-only",
+		Key:  "synthetic-only",
 	}
 	if err := provider.Save(p); err != nil {
 		t.Fatal(err)
@@ -58,8 +58,7 @@ func TestAnalyticsRoutes(t *testing.T) {
 
 	mux := http.NewServeMux()
 	analyticsRoutes(mux)
-
-	// 1. Test GET /api/analytics
+	// Test GET /api/analytics
 	req := httptest.NewRequest("GET", "/api/analytics?period=today", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -83,8 +82,8 @@ func TestAnalyticsRoutes(t *testing.T) {
 		t.Fatalf("expected 2 models in filters, got %v", data.Filters.Model)
 	}
 
-	// 2. Test GET /api/analytics/calls valid chart_id
-	reqCalls := httptest.NewRequest("GET", "/api/analytics/calls?period=today&chart_id=1.1", nil)
+	// Test GET /api/analytics/calls valid chart_id
+	reqCalls := httptest.NewRequest("GET", "/api/analytics/calls?period=today&chart_id=error_rate", nil)
 	recCalls := httptest.NewRecorder()
 	mux.ServeHTTP(recCalls, reqCalls)
 
@@ -102,7 +101,7 @@ func TestAnalyticsRoutes(t *testing.T) {
 		t.Fatalf("expected 1 error call, got %+v", callsResp.Calls)
 	}
 
-	// 3. Test GET /api/analytics/calls invalid chart_id -> 400
+	// Test GET /api/analytics/calls invalid chart_id -> 400
 	reqBad := httptest.NewRequest("GET", "/api/analytics/calls?period=today&chart_id=invalid", nil)
 	recBad := httptest.NewRecorder()
 	mux.ServeHTTP(recBad, reqBad)

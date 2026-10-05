@@ -20,6 +20,7 @@ func TestSettingsSaveKeepsCorruptFile(t *testing.T) {
 	for _, tc := range []struct{ path, body string }{
 		{"/api/settings", `{"theme":"light"}`},
 		{"/api/settings/quota-left", `{"on":true}`},
+		{"/api/settings/mask-accounts", `{"on":true}`},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			h := t.TempDir()
@@ -134,6 +135,7 @@ func TestSettingsSaveKeepsWhatItDoesNotSend(t *testing.T) {
 		Port:                3591,
 		CORSOrigins:         []string{"http://localhost:3000"},
 		GitHubToken:         "ghp_kept",
+		MaskAccounts:        true,
 		RequestArchive:      true,
 		RequestArchiveMaxMB: 64,
 		QuotaLeft:           true,

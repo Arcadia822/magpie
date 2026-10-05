@@ -46,6 +46,7 @@ func TestUsageSameSizeAndMtimeRewrite(t *testing.T) {
 	}
 }
 
+<<<<<<< HEAD
 func TestUsageSameTickRewriteIsNotCached(t *testing.T) {
 	for _, overBudget := range []bool{false, true} {
 		for _, appendAfter := range []bool{false, true} {
@@ -190,7 +191,7 @@ func TestUsageRewriteBeforeFingerprintIsNotCached(t *testing.T) {
 	}
 }
 
-func cacheBudget(t *testing.T, n int64) {
+func cacheBudget(t testing.TB, n int64) {
 	t.Helper()
 	old := requestCacheBytes
 	requestCacheBytes = n

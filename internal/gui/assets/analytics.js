@@ -1,5 +1,5 @@
-// Analytics View Controller (Issue #213)
-// Quality & Analytics dashboard with independent drilldown page view (left compact chart, right calls list & detail).
+// Analytics View Controller
+// Quality & Analytics dashboard with independent drilldown page view (left compact chart, right calls list).
 (() => {
   const page = $("#view-analytics");
   if (!page) return;
@@ -28,15 +28,19 @@
 
   // Independent Drill Page state
   let drillMode = false;     // true when on drill page
-  let drillChartId = null;   // "1.1" | "2.1" | "2.2" | "3.1" | "3.2" | null
+  let drillChartId = null;   // "error_rate" | "ttft" | "speed" | "cost" | "cache_hit_rate" | null
   let drillEntity = null;    // { dim: "model"|"provider"|"agent", val: string } | null
   let drillCalls = null;     // []Record from GET /api/analytics/calls
   let drillSeq = 0;          // ignore stale call responses
   let drillLoading = false;
+  let drillPendingKey = null;// pending period+filter+chart+entity key for dedup
   let drillError = null;     // error message or null
-  let activeCall = null;     // selected call record or null (detail mode)
-  let callsScrollTop = 0;    // saved scroll position of calls list
-  let activeCallIndex = null;// index of selected call item
+  let routeReqToken = 0;     // attempt token to invalidate stale inline-route mounts
+  let routePendingId = null; // route_id currently opening inline
+  let drillSavedScroll = null;// saved list scrollTop while the route is shown inline
+  let drillRoute = null;     // { id, t } the call whose routing is shown inline, or null
+  let drillRouteIndex = null;// index of that call in the list, kept selected
+  let drillRouteError = null;// error message when the inline route could not be loaded
   const DIMS = [
     ["all", "All"],
     ["model", "By Model"],
@@ -59,9 +63,24 @@
   };
 
   // Wire back button
+  function syncBackBtn() {
+    if (!backBtn) return;
+    const text = drillMode ? t("Back to Quality & Analytics") : t("Back to Usage");
+    const en = drillMode ? "Back to Quality & Analytics" : "Back to Usage";
+    backBtn.dataset.tt = en;
+    backBtn.dataset.enTitle = en;
+    backBtn.title = text;
+    backBtn.setAttribute("aria-label", text);
+  }
+
   if (backBtn) {
-    backBtn.onclick = () => {
-      if (typeof show === "function") show("usage");
+    syncBackBtn();
+    backBtn.onclick = (e) => {
+      if (drillMode) {
+        exitDrill(e);
+      } else {
+        show("usage");
+      }
     };
   }
 
@@ -84,9 +103,7 @@
 
   function fmtCostVal(usd) {
     if (usd === null || usd === undefined || isNaN(usd)) return "—";
-    if (usd === 0) return "$0.00";
-    if (usd < 0.01) return "<$0.01";
-    return "$" + usd.toFixed(2);
+    return fmtCost({ cost: usd, unpriced: 0 }) || "—";
   }
 
   function fmtTok(n) {
@@ -96,12 +113,27 @@
     if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
     return String(n);
   }
+  function getCostDisplayText(s) {
+    if (!s || !s.calls) return { val: "—", sub: t("No data in this period") };
+    if (!s.cost && s.unpriced) {
+      return { val: t("Unknown cost"), sub: t("No price for these models") };
+    }
+    return {
+      val: fmtCostVal(s.cost),
+      sub: s.unpriced ? t("≈{cost} ({n} unpriced)", { cost: fmtCostVal(s.cost), n: String(s.unpriced) }) : t("At model list price"),
+    };
+  }
+
+
+  function getAppLocale() {
+    return document.documentElement.lang || "en";
+  }
 
   function fmtTime(iso) {
     if (!iso) return "—";
     try {
       const d = new Date(iso);
-      return d.toLocaleTimeString([], { hour12: false });
+      return d.toLocaleTimeString(getAppLocale(), { hour12: false });
     } catch {
       return iso;
     }
@@ -111,7 +143,7 @@
     if (!iso) return "—";
     try {
       const d = new Date(iso);
-      return new Intl.DateTimeFormat(undefined, {
+      return new Intl.DateTimeFormat(getAppLocale(), {
         year: "numeric",
         month: "2-digit",
         day: "2-digit",
@@ -126,17 +158,6 @@
     }
   }
 
-  function getStatusExplanation(code, err) {
-    if (err) return err;
-    if (code === 200) return t("Request succeeded");
-    if (code === 429) return t("Rate limited by provider or quota exceeded");
-    if (code === 499) return t("Client closed connection");
-    if (code >= 500) return t("Upstream server or provider failure");
-    if (code === 400) return t("Invalid request parameters or payload");
-    if (code === 401 || code === 403) return t("Authentication or permissions failed");
-    if (code === 404) return t("Model or endpoint not found");
-    return t("HTTP error {code}", { code: String(code) });
-  }
 
   // Fetch /api/analytics
   async function fetchAnalytics() {
@@ -180,14 +201,11 @@
   // Open independent drill page for chart and optional entity
   function triggerDrill(chartId, entity, e) {
     if (pendingFetch) return;
-    if (e && typeof scrollOnPurpose === "function") scrollOnPurpose(e, 800);
+    if (e) scrollOnPurpose(e, 800);
 
     drillMode = true;
     drillChartId = chartId;
     drillEntity = entity;
-    activeCall = null;
-    activeCallIndex = null;
-    callsScrollTop = 0;
 
     // Save dashboard scroll position before hiding
     dashboardScrollTop = page.scrollTop || 0;
@@ -196,6 +214,9 @@
     controlsEl.hidden = true;
     bodyEl.hidden = true;
     drillPageEl.hidden = false;
+
+    // Update back button title and aria for drill mode
+    syncBackBtn();
 
     // Reset view scroll to top on entering drill page
     page.scrollTop = 0;
@@ -206,42 +227,78 @@
 
   // Return from drill page to main analytics dashboard
   function exitDrill(e) {
-    if (e && typeof scrollOnPurpose === "function") scrollOnPurpose(e, 800);
+    if (e) scrollOnPurpose(e, 800);
     drillSeq++; // Cancel any in-flight call requests
+    routeReqToken++;
+    routePendingId = null;
+    drillSavedScroll = null;
+    drillRoute = null;
+    drillRouteIndex = null;
+    drillRouteError = null;
+    if (window.unmountRoutingInline) window.unmountRoutingInline();
     drillMode = false;
     drillLoading = false;
+    drillPendingKey = null;
     drillCalls = null;
     drillError = null;
-    activeCall = null;
-    activeCallIndex = null;
-
+    // Drop the drill panes: the inline stage and its return button must
+    // not linger anywhere once Analytics is left
+    drillRightEl.replaceChildren();
+    drillLeftEl.replaceChildren();
+    drillHeadEl.replaceChildren();
     // Switch view sections
     drillPageEl.hidden = true;
     controlsEl.hidden = false;
     bodyEl.hidden = false;
 
+    // Restore back button title and aria for dashboard mode
+    syncBackBtn();
+
     // Restore dashboard scroll position
     requestAnimationFrame(() => {
       if (drillMode || page.hidden) return;
-      if (e && typeof scrollOnPurpose === "function") scrollOnPurpose(e, 500);
+      if (e) scrollOnPurpose(e, 500);
       page.scrollTop = dashboardScrollTop;
     });
   }
 
+  // Show the calls list again after the inline routing drill (keeps the
+  // left ranking, filters, period and the row the reader clicked)
+  function closeDrillRoute(e) {
+    if (e) scrollOnPurpose(e, 1000);
+    routeReqToken++;
+    routePendingId = null;
+    const idx = drillRouteIndex;
+    drillRoute = null;
+    drillRouteError = null;
+    if (window.unmountRoutingInline) window.unmountRoutingInline();
+    if (!drillMode || page.hidden) return;
+    renderDrillRight();
+    if (idx != null) {
+      const row = drillRightEl.querySelector(`.an-call-item[data-index="${idx}"]`);
+      if (row) row.classList.add("active");
+    }
+    requestAnimationFrame(() => {
+      if (!drillMode || page.hidden) return;
+      if (drillSavedScroll != null) page.scrollTop = drillSavedScroll;
+    });
+  }
+
+  // Any change of what the calls list shows (entity, period, dimension,
+  // filter) releases the inline route: the stage belongs to one call
+  function resetInlineRoute() {
+    if (!drillRoute && !drillRouteError) return;
+    routeReqToken++;
+    routePendingId = null;
+    drillRoute = null;
+    drillRouteIndex = null;
+    drillRouteError = null;
+    drillSavedScroll = null;
+    if (window.unmountRoutingInline) window.unmountRoutingInline();
+  }
+
   // Fetch /api/analytics/calls for drill-down
   async function fetchDrillCalls(chartId, entity) {
-    const seq = ++drillSeq;
-    drillLoading = true;
-    drillCalls = null;
-    drillError = null;
-
-    renderDrillRight();
-
-    const params = new URLSearchParams();
-    params.set("period", currentPeriod);
-    params.set("chart_id", chartId);
-    params.set("limit", "50");
-
     // Inherit active global filters
     let m = filters.model;
     let p = filters.provider;
@@ -253,6 +310,28 @@
       else if (entity.dim === "provider") p = entity.val;
       else if (entity.dim === "agent") a = entity.val;
     }
+
+    const reqKey = JSON.stringify([currentPeriod, m || "", p || "", a || "", chartId || ""]);
+    if (drillLoading && drillPendingKey === reqKey) {
+      return;
+    }
+
+    const seq = ++drillSeq;
+    routeReqToken++;
+    routePendingId = null;
+    drillSavedScroll = null;
+    drillLoading = true;
+    drillPendingKey = reqKey;
+    drillCalls = null;
+    drillError = null;
+
+    renderDrillRight();
+
+    const params = new URLSearchParams();
+    params.set("period", currentPeriod);
+    params.set("chart_id", chartId);
+    params.set("limit", "50");
+
     if (m) params.set("model", m);
     if (p) params.set("provider", p);
     if (a) params.set("agent", a);
@@ -262,12 +341,14 @@
       if (seq !== drillSeq) return; // Stale request, ignore
       drillCalls = res?.calls || [];
       drillLoading = false;
+      drillPendingKey = null;
       drillError = null;
       renderDrillRight();
     } catch (e) {
       if (seq !== drillSeq) return;
       drillCalls = null;
       drillLoading = false;
+      drillPendingKey = null;
       drillError = e.message || String(e);
       renderDrillRight();
     }
@@ -281,17 +362,15 @@
     if (!data) return;
 
     const summary = data.summary || {};
-    const noData = !summary.calls;
 
-    // 1. Theme 1: Reliability
-    renderReliabilitySection(summary, noData);
+    // Reliability
+    renderReliabilitySection(summary);
 
-    // 2. Theme 2: Speed
-    renderSpeedSection(summary, noData);
+    // Speed
+    renderSpeedSection(summary);
 
-    // 3. Theme 3: Cost & Cache
-    renderCostCacheSection(summary, noData);
-
+    // Cost & Cache
+    renderCostCacheSection(summary);
     if (drillMode) {
       renderDrillPage();
     }
@@ -310,7 +389,7 @@
       };
       periodSeg.append(b);
     }
-    if (typeof slide === "function") slide(periodSeg, "an-period");
+    slide(periodSeg, "an-period");
 
     // Dimension segments
     dimSeg.replaceChildren();
@@ -338,7 +417,7 @@
       };
       dimSeg.append(b);
     }
-    if (typeof slide === "function") slide(dimSeg, "an-dim");
+    slide(dimSeg, "an-dim");
 
     // Dropdown filters
     filtersBox.replaceChildren();
@@ -355,6 +434,11 @@
 
     const availFilters = data?.filters || { model: [], provider: [], agent: [] };
     const dimNames = { model: t("Model"), provider: t("Provider"), agent: t("Agent") };
+    const allLabels = {
+      model: t("All Models"),
+      provider: t("All Providers"),
+      agent: t("All Agents"),
+    };
 
     for (const fdim of filterDims) {
       const curVal = filters[fdim];
@@ -364,20 +448,27 @@
       btn.type = "button";
       btn.dataset.dim = fdim;
       btn.setAttribute("aria-haspopup", "true");
-      const displayLabel = curVal ? `${dimNames[fdim]}: ${curVal}` : t("All {name}", { name: dimNames[fdim] });
+      btn.setAttribute("aria-expanded", "false");
+      const displayLabel = curVal ? `${dimNames[fdim]}: ${curVal}` : (allLabels[fdim] || t("All {name}", { name: dimNames[fdim] }));
       btn.append(el("span", "an-filter-label", displayLabel), svg("M4 6l4 4 4-4", 10, 1.6));
 
       btn.onclick = (e) => {
-        const options = [{ value: "", label: t("All {name}", { name: dimNames[fdim] }) }];
-        for (const item of availFilters[fdim] || []) {
-          options.push({ value: item, label: typeof maskAccounts === "function" ? maskAccounts(item) : item });
+        e.stopPropagation();
+        if (btn.classList.contains("open")) {
+          if (typeof closeProtoMenu === "function") closeProtoMenu();
+          return;
         }
-        openFilterPicker(btn, fdim, options, curVal, e, (newVal) => {
+        const options = [{ v: "", name: allLabels[fdim] || t("All {name}", { name: dimNames[fdim] }), note: "" }];
+        for (const item of availFilters[fdim] || []) {
+          const masked = maskAccounts ? maskAccounts(item) : item;
+          options.push({ v: item, name: masked, note: "", literalName: true });
+        }
+        openProtoMenu(btn, options, curVal, (newVal) => {
           if (filters[fdim] === newVal) return;
           filters[fdim] = newVal;
           if (drillMode) exitDrill();
           fetchAnalytics();
-        });
+        }, dimNames[fdim], "an-filter-menu");
       };
 
       wrap.append(btn);
@@ -403,7 +494,7 @@
   }
 
   // --- Theme 1: Reliability ---
-  function renderReliabilitySection(s, noData) {
+  function renderReliabilitySection(s) {
     const sec = el("section", "an-theme-section");
     const head = el("div", "an-theme-head");
     head.append(el("span", "an-theme-title", t("Reliability")));
@@ -413,10 +504,12 @@
     const kpis = el("div", "an-kpis");
 
     const tSuccess = el("div", "an-kpi-tile");
+    const cancelPart = s.canceled ? ` · ${t("Canceled")}: ${s.canceled}` : "";
+    const cancelRatePart = s.cancel_rate ? ` (${fmtPct(s.cancel_rate)})` : "";
     tSuccess.append(
       el("span", "an-kpi-label", t("Success Rate")),
       el("span", "an-kpi-val", fmtPct(s.success_rate)),
-      el("span", "an-kpi-sub", s.calls ? t("{n} total calls", { n: String(s.calls) }) : t("No data in this period"))
+      el("span", "an-kpi-sub", s.calls ? (t("{n} total calls", { n: String(s.calls) }) + cancelPart + cancelRatePart) : t("No data in this period"))
     );
 
     const t429 = el("div", "an-kpi-tile");
@@ -436,30 +529,29 @@
     kpis.append(tSuccess, t429, t5xx);
     sec.append(kpis);
 
-    // Charts Grid (1.1 and 1.2)
+    // Charts Grid
     const grid = el("div", "an-charts-grid");
 
-    // 1.1 Error Rate Ranking
-    const c11 = el("div", "an-chart-card");
-    const h11 = el("div", "an-chart-head");
-    h11.append(el("span", "an-chart-title", t("Error Rate")));
-    c11.append(h11);
-
+    // Error Rate Ranking
+    const errorCard = el("div", "an-chart-card");
+    const errorHead = el("div", "an-chart-head");
+    errorHead.append(el("span", "an-chart-title", t("Error Rate")));
+    errorCard.append(errorHead);
     if (currentDim === "all") {
-      const isCardActive = drillChartId === "1.1" && !drillEntity;
+      const isCardActive = drillChartId === "error_rate" && !drillEntity;
       const card = el("button", "an-single-card" + (isCardActive ? " active" : ""));
       card.type = "button";
-      card.dataset.chartId = "1.1";
+      card.dataset.chartId = "error_rate";
+      const cancelSub = s.canceled ? ` · ${t("Canceled")}: ${s.canceled}` : "";
       card.append(
         el("span", "an-single-val", s.calls ? t("Error Rate {rate}", { rate: fmtPct(s.error_rate) }) : "—"),
-        el("span", "an-single-sub", s.calls ? t("429: {r} · 5xx: {s} · Other 4xx: {o}", { r: String(s.rate_limited || 0), s: String(s.server_err || 0), o: String(s.other_err || 0) }) : t("No data in this period"))
+        el("span", "an-single-sub", s.calls ? (t("429: {r} · 5xx: {s} · Other 4xx: {o}", { r: String(s.rate_limited || 0), s: String(s.server_err || 0), o: String(s.other_err || 0) }) + cancelSub) : t("No data in this period"))
       );
-      card.onclick = (e) => triggerDrill("1.1", null, e);
-      c11.append(card);
+      card.onclick = (e) => triggerDrill("error_rate", null, e);
+      errorCard.append(card);
     } else {
       const items = data.rankings?.[currentDim]?.by_error_rate || [];
-      // Issue review item #2: seg shares sum to 1 across errors, so total bar width = error_rate
-      c11.append(renderBarChart("1.1", items, "error_rate", (item) => {
+      errorCard.append(renderBarChart("error_rate", items, "error_rate", (item) => {
         const totalErr = (item.rate_limited || 0) + (item.server_err || 0) + (item.other_err || 0);
         if (!totalErr) return [];
         return [
@@ -471,22 +563,21 @@
         return fmtPct(item.error_rate);
       }));
     }
-    grid.append(c11);
+    grid.append(errorCard);
 
-    // 1.2 Error Trend (Read-only stacked bar chart)
-    const c12 = el("div", "an-chart-card");
-    const h12 = el("div", "an-chart-head");
-    h12.append(el("span", "an-chart-title", t("Error Trend")));
-    c12.append(h12);
-    c12.append(renderTrendChart(data.error_trend || []));
-    grid.append(c12);
-
+    // Error Trend (Read-only stacked bar chart)
+    const trendCard = el("div", "an-chart-card");
+    const trendHead = el("div", "an-chart-head");
+    trendHead.append(el("span", "an-chart-title", t("Error Trend")));
+    trendCard.append(trendHead);
+    trendCard.append(renderTrendChart(data.error_trend || []));
+    grid.append(trendCard);
     sec.append(grid);
     bodyEl.append(sec);
   }
 
   // --- Theme 2: Speed ---
-  function renderSpeedSection(s, noData) {
+  function renderSpeedSection(s) {
     const sec = el("section", "an-theme-section");
     const head = el("div", "an-theme-head");
     head.append(el("span", "an-theme-title", t("Response Speed")));
@@ -495,34 +586,28 @@
     const kpis = el("div", "an-kpis");
 
     if (currentDim === "all") {
-      const isTtftActive = drillChartId === "2.1";
+      const isTtftActive = drillChartId === "ttft";
       const bTtft = el("button", "an-kpi-tile" + (isTtftActive ? " active" : ""));
       bTtft.type = "button";
-      bTtft.dataset.chartId = "2.1";
+      bTtft.dataset.chartId = "ttft";
       bTtft.append(
         el("span", "an-kpi-label", t("End-to-End TTFT P95")),
         el("span", "an-kpi-val", fmtMs(s.ttft_p95)),
         el("span", "an-kpi-sub", s.timed ? t("P50 {p50} · {n} valid samples", { p50: fmtMs(s.ttft_p50), n: String(s.timed) }) : t("No streaming samples"))
       );
-      bTtft.onclick = (e) => triggerDrill("2.1", null, e);
+      bTtft.onclick = (e) => triggerDrill("ttft", null, e);
 
-      const isSpeedActive = drillChartId === "2.2";
+      const isSpeedActive = drillChartId === "speed";
       const bSpeed = el("button", "an-kpi-tile" + (isSpeedActive ? " active" : ""));
       bSpeed.type = "button";
-      bSpeed.dataset.chartId = "2.2";
-      let speedSub = s.decode_calls ? t("{n} valid decode samples", { n: String(s.decode_calls) }) : t("No decode samples");
-      if (s.excluded_decode_calls) {
-        speedSub = s.decode_calls
-          ? t("{n} valid decode samples ({x} excluded)", { n: String(s.decode_calls), x: String(s.excluded_decode_calls) })
-          : t("No decode samples ({x} excluded)", { x: String(s.excluded_decode_calls) });
-      }
+      bSpeed.dataset.chartId = "speed";
+      const speedSub = s.decode_calls ? t("{n} valid decode samples", { n: String(s.decode_calls) }) : t("No decode samples");
       bSpeed.append(
         el("span", "an-kpi-label", t("TPS")),
         el("span", "an-kpi-val", fmtSpeed(s.speed)),
         el("span", "an-kpi-sub", speedSub)
       );
-      bSpeed.onclick = (e) => triggerDrill("2.2", null, e);
-
+      bSpeed.onclick = (e) => triggerDrill("speed", null, e);
       kpis.append(bTtft, bSpeed);
       sec.append(kpis);
     } else {
@@ -534,12 +619,7 @@
       );
 
       const tSpeed = el("div", "an-kpi-tile");
-      let speedSub = s.decode_calls ? t("{n} valid decode samples", { n: String(s.decode_calls) }) : t("No decode samples");
-      if (s.excluded_decode_calls) {
-        speedSub = s.decode_calls
-          ? t("{n} valid decode samples ({x} excluded)", { n: String(s.decode_calls), x: String(s.excluded_decode_calls) })
-          : t("No decode samples ({x} excluded)", { x: String(s.excluded_decode_calls) });
-      }
+      const speedSub = s.decode_calls ? t("{n} valid decode samples", { n: String(s.decode_calls) }) : t("No decode samples");
       tSpeed.append(
         el("span", "an-kpi-label", t("TPS")),
         el("span", "an-kpi-val", fmtSpeed(s.speed)),
@@ -551,33 +631,33 @@
 
       const grid = el("div", "an-charts-grid");
 
-      // 2.1 TTFT P95 Ranking (DESC)
-      const c21 = el("div", "an-chart-card");
-      const h21 = el("div", "an-chart-head");
-      h21.append(el("span", "an-chart-title", t("TTFT")));
-      c21.append(h21);
+      // TTFT P95 Ranking (DESC)
+      const ttftCard = el("div", "an-chart-card");
+      const ttftHead = el("div", "an-chart-head");
+      ttftHead.append(el("span", "an-chart-title", t("TTFT")));
+      ttftCard.append(ttftHead);
       const ttftItems = data.rankings?.[currentDim]?.by_ttft || [];
-      c21.append(renderBarChart("2.1", ttftItems, "ttft_p95", (item) => {
+      ttftCard.append(renderBarChart("ttft", ttftItems, "ttft_p95", (item) => {
         return [{ cls: "seg-accent", share: 1 }];
       }, (item) => {
         if (item.ttft_p95 === null || item.ttft_p95 === undefined) return "—";
         return fmtMs(item.ttft_p95);
       }));
-      grid.append(c21);
+      grid.append(ttftCard);
 
-      // 2.2 Decode Speed Ranking (ASC)
-      const c22 = el("div", "an-chart-card");
-      const h22 = el("div", "an-chart-head");
-      h22.append(el("span", "an-chart-title", t("TPS")));
-      c22.append(h22);
+      // Speed Ranking
+      const speedCard = el("div", "an-chart-card");
+      const speedHead = el("div", "an-chart-head");
+      speedHead.append(el("span", "an-chart-title", t("TPS")));
+      speedCard.append(speedHead);
       const speedItems = data.rankings?.[currentDim]?.by_speed || [];
-      c22.append(renderBarChart("2.2", speedItems, "speed", (item) => {
+      speedCard.append(renderBarChart("speed", speedItems, "speed", (item) => {
         return [{ cls: "seg-accent", share: 1 }];
       }, (item) => {
         if (item.speed === null || item.speed === undefined) return "—";
         return fmtSpeed(item.speed);
       }));
-      grid.append(c22);
+      grid.append(speedCard);
 
       sec.append(grid);
     }
@@ -586,7 +666,7 @@
   }
 
   // --- Theme 3: Cost & Cache ---
-  function renderCostCacheSection(s, noData) {
+  function renderCostCacheSection(s) {
     const sec = el("section", "an-theme-section");
     const head = el("div", "an-theme-head");
     head.append(el("span", "an-theme-title", t("Cost & Cache")));
@@ -594,42 +674,29 @@
 
     const kpis = el("div", "an-kpis");
 
-    // Issue review item #6: Distinguish empty period, fully unpriced, and known zero cost
-    let costDisplay = "—";
-    let costSub = t("No data in this period");
-    if (s.calls) {
-      if (!s.cost && s.unpriced) {
-        costDisplay = t("Unknown cost");
-        costSub = t("No price for these models");
-      } else {
-        costDisplay = fmtCostVal(s.cost);
-        costSub = s.unpriced
-          ? t("≈{cost} ({n} unpriced)", { cost: fmtCostVal(s.cost), n: String(s.unpriced) })
-          : t("At model list price");
-      }
-    }
+    const { val: costDisplay, sub: costSub } = getCostDisplayText(s);
     if (currentDim === "all") {
-      const isCostActive = drillChartId === "3.1";
+      const isCostActive = drillChartId === "cost";
       const bCost = el("button", "an-kpi-tile" + (isCostActive ? " active" : ""));
       bCost.type = "button";
-      bCost.dataset.chartId = "3.1";
+      bCost.dataset.chartId = "cost";
       bCost.append(
         el("span", "an-kpi-label", t("Total Cost")),
         el("span", "an-kpi-val", costDisplay),
         el("span", "an-kpi-sub", costSub)
       );
-      bCost.onclick = (e) => triggerDrill("3.1", null, e);
+      bCost.onclick = (e) => triggerDrill("cost", null, e);
 
-      const isCacheActive = drillChartId === "3.2";
+      const isCacheActive = drillChartId === "cache_hit_rate";
       const bCache = el("button", "an-kpi-tile" + (isCacheActive ? " active" : ""));
       bCache.type = "button";
-      bCache.dataset.chartId = "3.2";
+      bCache.dataset.chartId = "cache_hit_rate";
       bCache.append(
         el("span", "an-kpi-label", t("Cache Hit Rate")),
         el("span", "an-kpi-val", fmtPct(s.cache_hit_rate)),
         el("span", "an-kpi-sub", s.input || s.cache_read ? t("Uncached {in} · Written {w}", { in: fmtTok(s.input), w: fmtTok(s.cache_write) }) : t("No prompt token records"))
       );
-      bCache.onclick = (e) => triggerDrill("3.2", null, e);
+      bCache.onclick = (e) => triggerDrill("cache_hit_rate", null, e);
 
       kpis.append(bCost, bCache);
       sec.append(kpis);
@@ -653,35 +720,34 @@
 
       const grid = el("div", "an-charts-grid");
 
-      // 3.1 Cost Ranking (DESC)
-      const c31 = el("div", "an-chart-card");
-      const h31 = el("div", "an-chart-head");
-      h31.append(el("span", "an-chart-title", t("Cost")));
-      c31.append(h31);
+      // Cost Ranking (DESC)
+      const costCard = el("div", "an-chart-card");
+      const costHead = el("div", "an-chart-head");
+      costHead.append(el("span", "an-chart-title", t("Cost")));
+      costCard.append(costHead);
       const costItems = data.rankings?.[currentDim]?.by_cost || [];
-      // Issue review item #8: Display item.share in tail text
-      c31.append(renderBarChart("3.1", costItems, "cost", (item) => {
+      // Display item.share in tail text
+      costCard.append(renderBarChart("cost", costItems, "cost", (item) => {
         return [{ cls: "seg-accent", share: 1 }];
       }, (item) => {
         return fmtCostVal(item.cost);
       }));
-      grid.append(c31);
+      grid.append(costCard);
 
-      // 3.2 Cache Hit Rate Ranking (ASC)
-      const c32 = el("div", "an-chart-card");
-      const h32 = el("div", "an-chart-head");
-      h32.append(el("span", "an-chart-title", t("Cache Hit Rate")));
-      c32.append(h32);
+      // Cache Hit Rate Ranking
+      const cacheCard = el("div", "an-chart-card");
+      const cacheHead = el("div", "an-chart-head");
+      cacheHead.append(el("span", "an-chart-title", t("Cache Hit Rate")));
+      cacheCard.append(cacheHead);
       const cacheItems = data.rankings?.[currentDim]?.by_cache_rate || [];
-      // Issue review item #7: formatted cache rate tail note via i18n
-      c32.append(renderBarChart("3.2", cacheItems, "cache_hit_rate", (item) => {
+      // Formatted cache rate tail note via i18n
+      cacheCard.append(renderBarChart("cache_hit_rate", cacheItems, "cache_hit_rate", (item) => {
         return [{ cls: "seg-green", share: 1 }];
       }, (item) => {
         if (item.cache_hit_rate === null || item.cache_hit_rate === undefined) return "—";
         return fmtPct(item.cache_hit_rate);
       }));
-      grid.append(c32);
-
+      grid.append(cacheCard);
       sec.append(grid);
     }
 
@@ -690,14 +756,14 @@
   // Ranking eligibility helper: returns true if entity has sufficient samples and data
   // - Insufficient (<10 calls / <10 timed / <10 decode / <10k cache tokens) is hidden
   // - UnknownCache (prompt >= 10k but read=write=0) is hidden
-  // - In cost chart (3.1): entities with unpriced models and cost=0/null are hidden.
+  // - In cost chart: entities with unpriced models and cost=0/null are hidden.
   //   Partially-priced models with cost>0 remain eligible with approx indicator.
   // - Real 0 metric values with sufficient samples (e.g. error_rate = 0, cost = 0 on known free tier) are preserved.
   function isRankEligible(chartId, item, valKey) {
     if (!item) return false;
     if (item.unknown_cache) return false;
     if (item.insufficient) return false;
-    if (chartId === "3.1" && item.has_unpriced && (item.cost === 0 || item.cost === null)) {
+    if (chartId === "cost" && item.has_unpriced && (item.cost === 0 || item.cost === null)) {
       return false;
     }
     const val = item[valKey];
@@ -710,7 +776,7 @@
     const calls = item.calls || 0;
     const errors = (item.rate_limited || 0) + (item.server_err || 0) + (item.other_err || 0);
     const canceled = item.canceled || 0;
-    lines.push(`${t("Calls")}: ${calls} (${t("Success")}: ${calls - errors - canceled}, ${t("Errors")}: ${errors}, ${t("Canceled")}: ${canceled})`);
+    lines.push(`${t("Call count")}: ${calls} (${t("Success")}: ${calls - errors - canceled}, ${t("Errors")}: ${errors}, ${t("Canceled")}: ${canceled})`);
     if (item.error_rate !== null && item.error_rate !== undefined) {
       lines.push(`${t("Error Rate")}: ${fmtPct(item.error_rate)} (429: ${item.rate_limited || 0}, 5xx: ${item.server_err || 0}, 4xx: ${item.other_err || 0})`);
     }
@@ -718,26 +784,15 @@
       lines.push(`${t("TTFT")}: P95 ${fmtMs(item.ttft_p95)} · P50 ${fmtMs(item.ttft_p50)}`);
     }
     if (item.speed !== null && item.speed !== undefined) {
-      let spdSamples = t("{n} samples", { n: String(item.decode_calls || 0) });
-      if (item.excluded_decode_calls) {
-        spdSamples = t("{n} valid, {x} excluded", { n: String(item.decode_calls || 0), x: String(item.excluded_decode_calls) });
-      }
+      const spdSamples = t("{n} samples", { n: String(item.decode_calls || 0) });
       lines.push(`${t("TPS")}: ${fmtSpeed(item.speed)} (${spdSamples})`);
-    } else if (item.excluded_decode_calls) {
-      lines.push(`${t("TPS")}: — (${t("{n} valid, {x} excluded", { n: "0", x: String(item.excluded_decode_calls) })})`);
     }
-    if (item.cost !== null && item.cost !== undefined) {
-      let costLine = "";
-      if (item.has_unpriced && (!item.cost || item.cost === 0)) {
-        costLine = `${t("Cost")}: ${t("Unknown cost")}`;
-      } else {
-        const costStr = item.has_unpriced ? t("≈{cost}", { cost: fmtCostVal(item.cost) }) : fmtCostVal(item.cost);
-        costLine = `${t("Cost")}: ${costStr}`;
-        if (item.share > 0) costLine += ` · ${fmtPct(item.share)}`;
-        if (item.has_unpriced) costLine += ` (${t("unpriced")})`;
-      }
-      lines.push(costLine);
+    const formatted = fmtCost(item);
+    let costLine = `${t("Cost")}: ${formatted ? "≈" + formatted : "—"}`;
+    if (item.unpriced) {
+      costLine += ` (${t("{n} unpriced", { n: item.unpriced })})`;
     }
+    lines.push(costLine);
     if (item.input || item.output || item.cache_read || item.cache_write) {
       const tokDetail = t("{in} in, {out} out, {hit} hit, {w} write", {
         in: fmtTok(item.input),
@@ -753,9 +808,18 @@
     return lines.join("\n");
   }
 
+  function resolveEntityItem(rawItem) {
+    const dimSummaries = data?.rankings?.[currentDim]?.summaries;
+    if (dimSummaries && rawItem?.key && dimSummaries[rawItem.key]) {
+      return { ...dimSummaries[rawItem.key], ...rawItem };
+    }
+    return rawItem;
+  }
+
   // --- Render Ranked Bar Chart ---
-  function renderBarChart(chartId, items, valKey, getSegs, getTailText) {
+  function renderBarChart(chartId, rawItems, valKey, getSegs, getTailText) {
     const wrap = el("div", "an-bars");
+    const items = (rawItems || []).map(resolveEntityItem);
 
     // Filter to only ranking-eligible entities (sufficient samples, non-null metrics, priced/known)
     const eligibleItems = items.filter((it) => isRankEligible(chartId, it, valKey));
@@ -893,22 +957,15 @@
   // --- Render Independent Drill Page ---
   function renderDrillPage() {
     const chartTitles = {
-      "1.1": t("Error Rate"),
-      "2.1": t("TTFT"),
-      "2.2": t("TPS"),
-      "3.1": t("Cost"),
-      "3.2": t("Cache Hit Rate"),
+      "error_rate": t("Error Rate"),
+      "ttft": t("TTFT"),
+      "speed": t("TPS"),
+      "cost": t("Cost"),
+      "cache_hit_rate": t("Cache Hit Rate"),
     };
 
-    // Header: Back button, Title & chips
+    // Header: Title & chips
     drillHeadEl.replaceChildren();
-
-    const back = el("button", "an-drill-back");
-    back.type = "button";
-    back.setAttribute("aria-label", t("Back to Quality & Analytics"));
-    back.title = t("Back to Quality & Analytics");
-    back.append(svg("M10 2L4 7l6 5", 14, 2));
-    back.onclick = (e) => exitDrill(e);
 
     const titleWrap = el("div", "an-drill-title-wrap");
     titleWrap.append(el("span", "an-drill-page-title", chartTitles[drillChartId] || t("Call Details")));
@@ -924,8 +981,7 @@
     }
     titleWrap.append(chips);
 
-    drillHeadEl.append(back, titleWrap);
-
+    drillHeadEl.append(titleWrap);
     // Left compact chart
     renderDrillLeft();
 
@@ -937,11 +993,11 @@
     drillLeftEl.replaceChildren();
 
     const chartNames = {
-      "1.1": t("Error Rate"),
-      "2.1": t("TTFT"),
-      "2.2": t("TPS"),
-      "3.1": t("Cost"),
-      "3.2": t("Cache Hit Rate"),
+      "error_rate": t("Error Rate"),
+      "ttft": t("TTFT"),
+      "speed": t("TPS"),
+      "cost": t("Cost"),
+      "cache_hit_rate": t("Cache Hit Rate"),
     };
 
     const head = el("div", "an-drill-left-head");
@@ -955,46 +1011,30 @@
     if (currentDim === "all") {
       // Overall single metric card
       const kpi = el("div", "an-drill-left-kpi");
-      if (drillChartId === "1.1") {
+      if (drillChartId === "error_rate") {
+        const cancelSub = s.canceled ? ` · ${t("Canceled")}: ${s.canceled}` : "";
         kpi.append(
           el("span", "an-drill-left-kpi-val", s.calls ? fmtPct(s.error_rate) : "—"),
-          el("span", "an-drill-left-kpi-sub", s.calls ? t("429: {r} · 5xx: {s} · Other 4xx: {o}", { r: String(s.rate_limited || 0), s: String(s.server_err || 0), o: String(s.other_err || 0) }) : t("No data in this period"))
+          el("span", "an-drill-left-kpi-sub", s.calls ? (t("429: {r} · 5xx: {s} · Other 4xx: {o}", { r: String(s.rate_limited || 0), s: String(s.server_err || 0), o: String(s.other_err || 0) }) + cancelSub) : t("No data in this period"))
         );
-      } else if (drillChartId === "2.1") {
+      } else if (drillChartId === "ttft") {
         kpi.append(
           el("span", "an-drill-left-kpi-val", fmtMs(s.ttft_p95)),
           el("span", "an-drill-left-kpi-sub", s.timed ? t("P50 {p50} · {n} valid samples", { p50: fmtMs(s.ttft_p50), n: String(s.timed) }) : t("No streaming samples"))
         );
-      } else if (drillChartId === "2.2") {
-        let speedSub = s.decode_calls ? t("{n} valid decode samples", { n: String(s.decode_calls) }) : t("No decode samples");
-        if (s.excluded_decode_calls) {
-          speedSub = s.decode_calls
-            ? t("{n} valid decode samples ({x} excluded)", { n: String(s.decode_calls), x: String(s.excluded_decode_calls) })
-            : t("No decode samples ({x} excluded)", { x: String(s.excluded_decode_calls) });
-        }
+      } else if (drillChartId === "speed") {
+        const speedSub = s.decode_calls ? t("{n} valid decode samples", { n: String(s.decode_calls) }) : t("No decode samples");
         kpi.append(
           el("span", "an-drill-left-kpi-val", fmtSpeed(s.speed)),
           el("span", "an-drill-left-kpi-sub", speedSub)
         );
-      } else if (drillChartId === "3.1") {
-        let costValStr = "—";
-        let costSubStr = t("No data in this period");
-        if (s.calls) {
-          if (!s.cost && s.unpriced) {
-            costValStr = t("Unknown cost");
-            costSubStr = t("No price for these models");
-          } else {
-            costValStr = fmtCostVal(s.cost);
-            costSubStr = s.unpriced
-              ? t("≈{cost} ({n} unpriced)", { cost: fmtCostVal(s.cost), n: String(s.unpriced) })
-              : t("At model list price");
-          }
-        }
+      } else if (drillChartId === "cost") {
+        const { val: costValStr, sub: costSubStr } = getCostDisplayText(s);
         kpi.append(
           el("span", "an-drill-left-kpi-val", costValStr),
           el("span", "an-drill-left-kpi-sub", costSubStr)
         );
-      } else if (drillChartId === "3.2") {
+      } else if (drillChartId === "cache_hit_rate") {
         kpi.append(
           el("span", "an-drill-left-kpi-val", fmtPct(s.cache_hit_rate)),
           el("span", "an-drill-left-kpi-sub", s.input || s.cache_read ? t("Uncached {in} · Written {w}", { in: fmtTok(s.input), w: fmtTok(s.cache_write) }) : t("No prompt token records"))
@@ -1005,31 +1045,17 @@
     }
 
     // In dimensional rankings: show list of entities, clickable to switch active drill entity
-    let items = [];
-    let valKey = "error_rate";
-    let fmtVal = (item) => fmtPct(item.error_rate);
-
-    if (drillChartId === "1.1") {
-      items = data?.rankings?.[currentDim]?.by_error_rate || [];
-      valKey = "error_rate";
-      fmtVal = (item) => fmtPct(item.error_rate);
-    } else if (drillChartId === "2.1") {
-      items = data?.rankings?.[currentDim]?.by_ttft || [];
-      valKey = "ttft_p95";
-      fmtVal = (item) => fmtMs(item.ttft_p95);
-    } else if (drillChartId === "2.2") {
-      items = data?.rankings?.[currentDim]?.by_speed || [];
-      valKey = "speed";
-      fmtVal = (item) => fmtSpeed(item.speed);
-    } else if (drillChartId === "3.1") {
-      items = data?.rankings?.[currentDim]?.by_cost || [];
-      valKey = "cost";
-      fmtVal = (item) => fmtCostVal(item.cost);
-    } else if (drillChartId === "3.2") {
-      items = data?.rankings?.[currentDim]?.by_cache_rate || [];
-      valKey = "cache_hit_rate";
-      fmtVal = (item) => fmtPct(item.cache_hit_rate);
-    }
+    const rankingProps = {
+      "error_rate": { list: data?.rankings?.[currentDim]?.by_error_rate, key: "error_rate", fmt: (it) => fmtPct(it.error_rate) },
+      "ttft": { list: data?.rankings?.[currentDim]?.by_ttft, key: "ttft_p95", fmt: (it) => fmtMs(it.ttft_p95) },
+      "speed": { list: data?.rankings?.[currentDim]?.by_speed, key: "speed", fmt: (it) => fmtSpeed(it.speed) },
+      "cost": { list: data?.rankings?.[currentDim]?.by_cost, key: "cost", fmt: (it) => fmtCostVal(it.cost) },
+      "cache_hit_rate": { list: data?.rankings?.[currentDim]?.by_cache_rate, key: "cache_hit_rate", fmt: (it) => fmtPct(it.cache_hit_rate) },
+    };
+    const cfg = rankingProps[drillChartId] || rankingProps["error_rate"];
+    let valKey = cfg.key;
+    let fmtVal = cfg.fmt;
+    let items = (cfg.list || []).map(resolveEntityItem);
     items = items.filter((it) => isRankEligible(drillChartId, it, valKey));
     // Button to select "All"
     const allBtn = el("button", "an-drill-left-all-btn" + (!drillEntity ? " active" : ""));
@@ -1040,10 +1066,8 @@
     );
     allBtn.onclick = () => {
       if (!drillEntity) return;
+      resetInlineRoute();
       drillEntity = null;
-      activeCall = null;
-      activeCallIndex = null;
-      callsScrollTop = 0;
       renderDrillPage();
       fetchDrillCalls(drillChartId, null);
     };
@@ -1080,11 +1104,9 @@
       row.append(name, num, track);
       row.onclick = (e) => {
         if (drillEntity?.val === item.key && drillEntity?.dim === currentDim) return;
-        if (e && typeof scrollOnPurpose === "function") scrollOnPurpose(e, 500);
+        if (e) scrollOnPurpose(e, 500);
+        resetInlineRoute();
         drillEntity = { dim: currentDim, val: item.key };
-        activeCall = null;
-        activeCallIndex = null;
-        callsScrollTop = 0;
         renderDrillPage();
         fetchDrillCalls(drillChartId, drillEntity);
       };
@@ -1094,26 +1116,96 @@
     drillLeftEl.append(itemsBox);
   }
 
-  function renderDrillRight(returnEvent) {
+  function renderDrillRight() {
+    // a re-render (locale, costs) keeps the inline stage where it is: the
+    // Routing view redraws its own words on a language change
+    if (drillRoute && !drillRouteError) {
+      const live = drillRightEl.querySelector(".an-drill-routing");
+      if (live && live.dataset.routeId === String(drillRoute.id)) return;
+    }
+    const keepIndex = drillRouteIndex;
+    const keepScroll = page.scrollTop || 0;
     drillRightEl.replaceChildren();
 
-    if (activeCall) {
-      // Right pane completely replaced by call detail view
-      renderDrillDetail(activeCall);
+    if (drillLoading) {
+      drillRightEl.setAttribute("aria-busy", "true");
+    } else {
+      drillRightEl.removeAttribute("aria-busy");
+    }
+
+
+    // The routing drill: the same stage and story the Routing view plays,
+    // mounted here in place of the call list, the view never leaving Analytics
+    if (drillRoute) {
+      if (drillRouteError) {
+        const errBox = el("div", "an-drill-state-box an-err");
+        const backErr = el("button", "an-drill-route-back", t("Back to analytics calls"));
+        backErr.type = "button";
+        backErr.onclick = (e) => closeDrillRoute(e);
+        const retryBtn = el("button", "an-drill-retry-btn", t("Retry"));
+        retryBtn.type = "button";
+        retryBtn.onclick = () => { drillRouteError = null; renderDrillRight(); };
+        errBox.append(el("span", "", drillRouteError), retryBtn, backErr);
+        drillRightEl.append(errBox);
+        return;
+      }
+      const host = el("div", "an-drill-routing");
+      host.id = "anDrillRouting";
+      host.dataset.routeId = drillRoute.id;
+      drillRightEl.append(host);
+      drillRightEl.setAttribute("aria-busy", "true");
+      const token = routeReqToken;
+      const myRouteId = drillRoute.id;
+      const isCurrent = () =>
+        routeReqToken === token &&
+        !!drillRoute && drillRoute.id === myRouteId &&
+        drillMode && !page.hidden;
+      const mount = window.mountRoutingInline;
+      const settle = () => {
+        if (routeReqToken !== token) return;
+        if (routePendingId === myRouteId) routePendingId = null;
+        drillRightEl.removeAttribute("aria-busy");
+      };
+      if (mount) {
+        Promise.resolve(mount(host, drillRoute.id, drillRoute.t, {
+          isCurrent,
+          onReturn: (e) => closeDrillRoute(e),
+        })).then(settle).catch((err) => {
+          if (!isCurrent()) { settle(); return; }
+          drillRouteError = err?.message || t("Routing history for this request is no longer available.");
+          renderDrillRight();
+        });
+      } else {
+        settle();
+      }
       return;
     }
 
     // Calls list view
     const head = el("div", "an-drill-right-head");
+    const drillTitle = drillChartId === "cache_hit_rate"
+      ? t("Largest Uncached Input Calls")
+      : drillChartId === "cost"
+      ? t("Highest Cost Calls")
+      : drillChartId === "speed"
+      ? t("Slowest Decode Calls")
+      : drillChartId === "ttft"
+      ? t("Slowest TTFT Calls")
+      : t("Top 50 Calls");
     head.append(
-      el("span", "an-drill-right-title", t("Top 50 Calls")),
+      el("span", "an-drill-right-title", drillTitle),
       el("span", "an-drill-right-meta", drillCalls ? `${drillCalls.length} ${t("Calls")}` : "")
     );
     drillRightEl.append(head);
-
     if (drillLoading) {
       const loadingBox = el("div", "an-drill-state-box");
-      loadingBox.append(el("span", "", t("Loading calls…")));
+      loadingBox.setAttribute("role", "status");
+      loadingBox.setAttribute("aria-live", "polite");
+
+      const spinner = el("span", "an-spinner");
+      spinner.setAttribute("aria-hidden", "true");
+
+      loadingBox.append(spinner, el("span", "", t("Loading calls…")));
       drillRightEl.append(loadingBox);
       return;
     }
@@ -1140,23 +1232,26 @@
       drillRightEl.append(emptyBox);
       return;
     }
-
     const list = el("div", "an-calls-list");
     for (let i = 0; i < calls.length; i++) {
       const c = calls[i];
-      const isSelected = activeCallIndex === i;
-      const item = el("button", "an-call-item" + (isSelected ? " active" : ""));
+      const hasRoute = Boolean(c.route_id);
+      const item = el("button", "an-call-item" + (!hasRoute ? " disabled" : ""));
       item.type = "button";
       item.dataset.index = String(i);
+      if (!hasRoute) {
+        item.disabled = true;
+        item.setAttribute("aria-disabled", "true");
+        item.title = t("This call has no linked routing record.");
+      }
 
       let stCls = "st-ok";
-      if (c.err || c.error) {
-        stCls = c.status >= 500 ? "st-5xx" : (c.status === 429 ? "st-429" : (c.status === 499 ? "st-499" : "st-5xx"));
+      if (c.err) {
+        stCls = c.status >= 500 ? "st-5xx" : (c.status === 429 ? "st-429" : (c.status === 499 ? "st-499" : "st-err"));
       } else if (c.status === 429) stCls = "st-429";
       else if (c.status === 499) stCls = "st-499";
       else if (c.status >= 500) stCls = "st-5xx";
       else if (c.status >= 400) stCls = "st-err";
-
       const top = el("div", "an-call-item-top");
       top.append(
         el("span", "an-call-item-time", fmtTime(c.t)),
@@ -1171,212 +1266,61 @@
       const bottom = el("div", "an-call-item-bottom");
       bottom.append(
         el("span", "", `${t("Duration")}: ${fmtMs(c.ms)}`),
-        el("span", "", `${t("TTFT")}: ${fmtMs(c.ttft_ms)}`),
+        el("span", "", `${t("TTFT")}: ${fmtMs(c.ttft_ms)}`)
+      );
+      if (c.speed !== undefined && c.speed !== null) {
+        bottom.append(el("span", "", `${t("TPS")}: ${fmtSpeed(c.speed)}`));
+      }
+      if (c.cost !== undefined && c.cost !== null) {
+        bottom.append(el("span", "", `${t("Cost")}: ${fmtCostVal(c.cost)}`));
+      }
+      bottom.append(
         el("span", "", tokStr),
         el("span", "", `${c.session || "—"}${c.kind ? " · " + c.kind : ""}`)
       );
-
       item.append(top, bottom);
 
-      item.onclick = (e) => {
-        callsScrollTop = page.scrollTop || 0;
-        if (e && typeof scrollOnPurpose === "function") scrollOnPurpose(e, 800);
-        activeCall = c;
-        activeCallIndex = i;
-        renderDrillRight();
-        requestAnimationFrame(() => {
-          if (e && typeof scrollOnPurpose === "function") scrollOnPurpose(e, 500);
-          page.scrollTop = 0;
-        });
-      };
+      if (hasRoute) {
+        item.onclick = () => {
+          if (routePendingId === c.route_id) return;
+          if (drillRoute && drillRoute.id === c.route_id) return;
+          if (drillRoute && window.unmountRoutingInline) window.unmountRoutingInline();
+          routePendingId = c.route_id;
+          routeReqToken++;
+          drillSavedScroll = page.scrollTop || 0;
+          drillRouteIndex = i;
+          drillRouteError = null;
+          drillRoute = { id: c.route_id, t: c.t };
+          renderDrillRight();
+        };
+      }
 
       list.append(item);
     }
 
     drillRightEl.append(list);
-
-    // Restore the list's scroll only when coming back from its detail
-    if (returnEvent && callsScrollTop > 0) {
-      const targetScroll = callsScrollTop;
-      requestAnimationFrame(() => {
-        if (!drillMode || activeCall || page.hidden) return;
-        if (typeof scrollOnPurpose === "function") scrollOnPurpose(returnEvent, 1000);
-        page.scrollTop = targetScroll;
-      });
+    if (keepIndex != null) {
+      const row = list.querySelector(`.an-call-item[data-index="${keepIndex}"]`);
+      if (row) row.classList.add("active");
     }
+    requestAnimationFrame(() => {
+      if (!drillMode || page.hidden) return;
+      if (keepScroll && Math.abs((page.scrollTop || 0) - keepScroll) > 1) page.scrollTop = keepScroll;
+    });
   }
 
-  function renderDrillDetail(c) {
-    const head = el("div", "an-drill-right-head");
 
-    const returnBtn = el("button", "an-drill-return-btn");
-    returnBtn.type = "button";
-    returnBtn.setAttribute("aria-label", t("Back to Calls"));
-    returnBtn.title = t("Back to Calls");
-    returnBtn.append(svg("M10 2L4 7l6 5", 12, 2));
-    returnBtn.onclick = (e) => {
-      if (e && typeof scrollOnPurpose === "function") scrollOnPurpose(e, 1500);
-      activeCall = null;
-      renderDrillRight(e);
-    };
-
-    head.append(
-      returnBtn,
-      el("span", "an-drill-right-title", t("Call Details"))
-    );
-    drillRightEl.append(head);
-
-    drillRightEl.append(renderCallDetailCard(c));
-  }
-
-  // --- Render In-Place Call Detail Card ---
-  function renderCallDetailCard(c) {
-    const card = el("div", "an-call-detail-box");
-
-    // 1. Basic Info
-    const g1 = el("div", "an-detail-group");
-    g1.append(el("b", "", t("Basic Info")));
-    g1.append(createDetailRow(t("Time"), c.t ? new Date(c.t).toLocaleString() : "—"));
-    g1.append(createDetailRow(t("Agent"), c.agent || "—"));
-    g1.append(createDetailRow(t("Kind"), c.kind || "—"));
-
-    const sessRow = el("div", "an-detail-row");
-    sessRow.append(el("span", "", t("Session ID")));
-    const sessValWrap = el("span");
-    sessValWrap.append(document.createTextNode(c.session || "—"));
-    if (c.session) {
-      const cp = copyBtn(c.session, t("Session id"));
-      cp.classList.add("an-sess-copy-btn");
-      cp.type = "button";
-      cp.setAttribute("aria-label", t("Copy") + " " + t("Session id"));
-      cp.onclick = (ev) => {
-        ev.stopPropagation();
-        copy(c.session, t("Session id"), cp, undefined, t("Failed to copy session ID"));
-      };
-      sessValWrap.append(cp);
-    }
-    sessRow.append(sessValWrap);
-    g1.append(sessRow);
-
-    // 2. Routing
-    const g2 = el("div", "an-detail-group");
-    g2.append(el("b", "", t("Routing")));
-    g2.append(createDetailRow(t("Provider"), c.provider || "—"));
-    g2.append(createDetailRow(t("Host"), c.host || "—"));
-    g2.append(createDetailRow(t("Model"), c.model || "—"));
-    g2.append(createDetailRow(t("Effort"), c.effort || "—"));
-
-    // 3. Performance
-    const g3 = el("div", "an-detail-group");
-    g3.append(el("b", "", t("Performance")));
-    g3.append(createDetailRow(t("Total Duration"), fmtMs(c.ms)));
-    g3.append(createDetailRow(t("End-to-End TTFT"), fmtMs(c.ttft_ms)));
-    // Decode speed formula: status < 400 && !err && ttft_ms > 0 && out > 0 && ms > ttft_ms && (ms - ttft_ms) >= 100
-    let spdVal = "—";
-    if (c.status < 400 && !c.err && !c.error && c.ttft_ms > 0 && c.out > 0 && c.ms > c.ttft_ms) {
-      if (c.ms - c.ttft_ms >= 100) {
-        const spd = c.out / ((c.ms - c.ttft_ms) / 1000);
-        spdVal = fmtSpeed(spd);
-      } else {
-        spdVal = t("— (interval < 100ms)");
-      }
-    }
-    g3.append(createDetailRow(t("TPS"), spdVal));
-
-    // 4. Tokens & Cache
-    const g4 = el("div", "an-detail-group");
-    g4.append(el("b", "", t("Tokens & Cache")));
-    g4.append(createDetailRow(t("Input Tokens"), String(c.in || 0)));
-    g4.append(createDetailRow(t("Output Tokens"), String(c.out || 0)));
-    g4.append(createDetailRow(t("Cache Read"), String(c.cache_read || 0)));
-    g4.append(createDetailRow(t("Cache Write"), String(c.cache_write || 0)));
-    const fullPrompt = (c.in || 0) + (c.cache_read || 0) + (c.cache_write || 0);
-    g4.append(createDetailRow(t("Full Prompt Tokens"), String(fullPrompt)));
-
-    // 5. Cache Rate & Cost
-    const g5 = el("div", "an-detail-group");
-    g5.append(el("b", "", t("Cache Rate & Cost")));
-    const denom = (c.in || 0) + (c.cache_read || 0);
-    const hitRate = denom > 0 ? (c.cache_read || 0) / denom : null;
-    g5.append(createDetailRow(t("Cache Hit Rate"), fmtPct(hitRate)));
-    g5.append(createDetailRow(t("Cost"), fmtCostVal(c.cost)));
-
-    // 6. Reasoning Output Split
-    const g6 = el("div", "an-detail-group");
-    g6.append(el("b", "", t("Reasoning")));
-    const rCount = c.reasoning || 0;
-    const bodyOut = Math.max(0, (c.out || 0) - rCount);
-    g6.append(createDetailRow(t("Thinking Output"), String(rCount)));
-    g6.append(createDetailRow(t("Content Output"), String(bodyOut)));
-
-    // 7. Status & Explanation
-    const g7 = el("div", "an-detail-group");
-    g7.append(el("b", "", t("Status")));
-    g7.append(createDetailRow(t("HTTP Code"), String(c.status)));
-    g7.append(createDetailRow(t("Explanation"), getStatusExplanation(c.status, c.err || c.error)));
-
-    card.append(g1, g2, g3, g4, g5, g6, g7);
-    return card;
-  }
-
-  function createDetailRow(label, val) {
-    const row = el("div", "an-detail-row");
-    row.append(el("span", "", label), el("span", "", val));
-    return row;
-  }
-
-  // Issue review item #1: Popover picker using openPicker contract with onPick / menu
-  function openFilterPicker(anchor, key, options, currentVal, ev, onPick) {
-    if (typeof openPicker === "function") {
-      const pseudoField = {
-        key: key,
-        label: key,
-        value: currentVal,
-        options: options,
-        menu: true,
-        onPick: (val) => {
-          onPick(val);
-        },
-      };
-      openPicker({ id: "analytics", name: "Analytics", fields: [] }, pseudoField, anchor, ev);
-      return;
-    }
-
-    // Fallback if openPicker is not available
-    const pop = $("#pop");
-    if (!pop) return;
-
-    pop.querySelector(".search").hidden = true;
-    pop.querySelector(".picker-body").hidden = false;
-    pop.querySelector("#pickerRail").hidden = true;
-    if (pop.querySelector("#effortControl")) pop.querySelector("#effortControl").hidden = true;
-
-    const list = pop.querySelector("#list");
-    list.replaceChildren();
-
-    for (const opt of options) {
-      const li = el("li", opt.value === currentVal ? "selected" : "");
-      li.append(el("span", "n", opt.label));
-      li.onclick = () => {
-        if (typeof closePicker === "function") closePicker();
-        pop.hidden = true;
-        onPick(opt.value);
-      };
-      list.append(li);
-    }
-
-    pop.hidden = false;
-    if (typeof placePop === "function") {
-      placePop(anchor, 220, Math.min(280, options.length * 36 + 16));
-    }
-  }
 
   // Export module lifecycle
-  // Issue review item #3: close drill & increment drillSeq when period changes on load
-  async function load(initialPeriod) {
+  async function load(initialPeriod, restore = false) {
+    if (restore) {
+      syncBackBtn();
+      render();
+      return;
+    }
+    if (drillMode) exitDrill();
     if (initialPeriod && initialPeriod !== currentPeriod) {
       currentPeriod = initialPeriod;
-      if (drillMode) exitDrill();
     }
     await fetchAnalytics();
   }
@@ -1388,24 +1332,25 @@
       page.classList.remove("loading");
       page.removeAttribute("aria-busy");
       drillSeq++;
-      if (drillMode) {
-        exitDrill();
-      }
+      routeReqToken++;
+      routePendingId = null;
+      drillPendingKey = null;
+      if (drillMode) exitDrill();
     }
   });
   observer.observe(page, { attributes: true, attributeFilter: ["hidden"] });
 
   window.loadAnalytics = load;
-  // React to locale change
-  const origSetLocale = window.setLocale;
-  if (typeof origSetLocale === "function") {
-    window.setLocale = function (pref) {
-      const res = origSetLocale(pref);
-      if (!page.hidden) render();
-      return res;
-    };
-  }
-
+  window.renderAnalytics = () => {
+    if (!page.hidden) render();
+  };
+  document.addEventListener("magpie-locale-changed", () => {
+    syncBackBtn();
+    if (!page.hidden) render();
+  });
+  document.addEventListener("magpie-costs-changed", () => {
+    if (!page.hidden) render();
+  });
   // If page was opened directly via ?view=analytics before analytics.js executed
   if (!page.hidden) {
     const p = typeof period === "string" ? period : "30d";

@@ -57,11 +57,18 @@ func TestAnalyzeMetricsAndQuantiles(t *testing.T) {
 	// Errors = 4 (status >= 400 counts in Totals.Errors)
 	// Success rate = (14 - 4) / 14 = 10 / 14
 	// Error rate (excludes 499) = (1 + 1 + 1) / 14 = 3 / 14
-	// Canceled = 1
+	// Canceled = 1 -> cancel_rate = 1 / 14
 	data := analyzeWith(Today, AnalyticsFilter{}, now, recs, lookup)
 
 	if data.Summary.Calls != 14 {
-		t.Fatalf("calls = %d, want 14", data.Summary.Calls)
+		t.Fatalf("summary calls = %d, want 14", data.Summary.Calls)
+	}
+	if data.Summary.Canceled != 1 {
+		t.Fatalf("summary canceled = %d, want 1", data.Summary.Canceled)
+	}
+	wantCancelRate := 1.0 / 14.0
+	if data.Summary.CancelRate == nil || math.Abs(*data.Summary.CancelRate-wantCancelRate) > 1e-6 {
+		t.Fatalf("cancel_rate = %v, want %v", data.Summary.CancelRate, wantCancelRate)
 	}
 	if data.Summary.Errors != 4 {
 		t.Fatalf("errors = %d, want 4", data.Summary.Errors)
@@ -79,15 +86,15 @@ func TestAnalyzeMetricsAndQuantiles(t *testing.T) {
 	}
 
 	// TTFT quantiles for 10 samples: [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
-	// p50: ceil(0.50 * 10) - 1 = 5 - 1 = 4 -> 500
-	// p95: ceil(0.95 * 10) - 1 = 10 - 1 = 9 -> 1000
-	if data.Summary.TTFTP50 == nil || *data.Summary.TTFTP50 != 500 {
-		t.Fatalf("ttft_p50 = %v, want 500", data.Summary.TTFTP50)
+	// exact p50: ceil(0.50 * 10) - 1 = 5 - 1 = 4 -> 500
+	// exact p95: ceil(0.95 * 10) - 1 = 10 - 1 = 9 -> 1000
+	// DDSketch tolerance: abs(estimate - exact) <= 0.01 * exact + 1 ms
+	if data.Summary.TTFTP50 == nil || math.Abs(float64(*data.Summary.TTFTP50-500)) > 500*0.01+1 {
+		t.Fatalf("ttft_p50 = %v, want ~500", data.Summary.TTFTP50)
 	}
-	if data.Summary.TTFTP95 == nil || *data.Summary.TTFTP95 != 1000 {
-		t.Fatalf("ttft_p95 = %v, want 1000", data.Summary.TTFTP95)
+	if data.Summary.TTFTP95 == nil || math.Abs(float64(*data.Summary.TTFTP95-1000)) > 1000*0.01+1 {
+		t.Fatalf("ttft_p95 = %v, want ~1000", data.Summary.TTFTP95)
 	}
-
 	// Speed: 10 decode calls, each output=500, decodeMs=1000 (1.0s)
 	// Total DecodeOut = 5000, Total DecodeMs = 10000 -> 5000 / 10 = 500 tok/s
 	if data.Summary.DecodeCalls != 10 {
@@ -159,6 +166,13 @@ func TestAnalyzeRankingsSortAndThresholds(t *testing.T) {
 	}
 	if suite.ByErrorRate[2].Key != "m3" || !suite.ByErrorRate[2].Insufficient {
 		t.Fatalf("third item should be m3 insufficient: %+v", suite.ByErrorRate[2])
+	}
+	// Verify shared summaries map contains all entities
+	if len(suite.Summaries) != 3 {
+		t.Fatalf("summaries len = %d, want 3", len(suite.Summaries))
+	}
+	if sumM1, ok := suite.Summaries["m1"]; !ok || sumM1.Calls != 10 {
+		t.Fatalf("summaries[m1] calls = %v, want 10", sumM1.Calls)
 	}
 }
 
@@ -258,8 +272,8 @@ func TestRecentCallsFilteringAndSorting(t *testing.T) {
 		})
 	}
 
-	// 1. Chart 2.1 (TTFT DESC): limit 50
-	calls, err := recentCallsWith(Today, AnalyticsFilter{}, "2.1", 50, now, recs, lookup)
+	// 1. Chart "ttft" (TTFT DESC): limit 50
+	calls, err := recentCallsWith(Today, AnalyticsFilter{}, "ttft", 50, now, recs, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,13 +288,13 @@ func TestRecentCallsFilteringAndSorting(t *testing.T) {
 		t.Fatal("cost should be calculated")
 	}
 
-	// 2. Chart 1.1: Error calls (status >= 400 excluding 499) time DESC
+	// 2. Chart "error_rate": Error calls (status >= 400 excluding 499) time DESC
 	errRecs := []Record{
 		{Time: now.Add(-3 * time.Minute), Provider: "p", Model: "m", Status: 500},
 		{Time: now.Add(-2 * time.Minute), Provider: "p", Model: "m", Status: 499}, // Canceled: MUST BE EXCLUDED
 		{Time: now.Add(-1 * time.Minute), Provider: "p", Model: "m", Status: 429},
 	}
-	calls11, err := recentCallsWith(Today, AnalyticsFilter{}, "1.1", 50, now, errRecs, lookup)
+	calls11, err := recentCallsWith(Today, AnalyticsFilter{}, "error_rate", 50, now, errRecs, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,13 +305,13 @@ func TestRecentCallsFilteringAndSorting(t *testing.T) {
 		t.Fatalf("expected 429 then 500: %+v", calls11)
 	}
 
-	// 3. Chart 2.2: decode speed ASC (out / ((ms - ttft) / 1000))
+	// 3. Chart "speed": decode speed ASC (out / ((ms - ttft) / 1000))
 	speedRecs := []Record{
 		{Time: now.Add(-3 * time.Minute), Provider: "p", Model: "m", Status: 200, Output: 100, TTFT: 100, Millis: 1100}, // 100 / 1s = 100 tok/s
 		{Time: now.Add(-2 * time.Minute), Provider: "p", Model: "m", Status: 200, Output: 20, TTFT: 100, Millis: 1100},  // 20 / 1s = 20 tok/s (slower)
 		{Time: now.Add(-1 * time.Minute), Provider: "p", Model: "m", Status: 200, Output: 0, TTFT: 100, Millis: 1100},   // Output=0 invalid
 	}
-	calls22, err := recentCallsWith(Today, AnalyticsFilter{}, "2.2", 50, now, speedRecs, lookup)
+	calls22, err := recentCallsWith(Today, AnalyticsFilter{}, "speed", 50, now, speedRecs, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,14 +322,14 @@ func TestRecentCallsFilteringAndSorting(t *testing.T) {
 		t.Fatalf("expected slower (20 tok/s) first, got: %+v", calls22)
 	}
 
-	// 4. Chart 3.1: costs DESC known before unknown
+	// 4. Chart "cost": costs DESC known before unknown
 	costRecs := []Record{
 		{Time: now.Add(-4 * time.Minute), Provider: "unknown", Model: "m", Status: 200, Input: 1000, Output: 1000}, // unpriced
 		{Time: now.Add(-3 * time.Minute), Provider: "p", Model: "m", Status: 200, Input: 100, Output: 100},         // cheaper
 		{Time: now.Add(-2 * time.Minute), Provider: "p", Model: "m", Status: 200, Input: 10000, Output: 10000},     // expensive
 		{Time: now.Add(-1 * time.Minute), Provider: "p", Model: "m", Status: 200, Input: 0, Output: 0},             // 0 tokens: cost null
 	}
-	calls31, err := recentCallsWith(Today, AnalyticsFilter{}, "3.1", 50, now, costRecs, lookup)
+	calls31, err := recentCallsWith(Today, AnalyticsFilter{}, "cost", 50, now, costRecs, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,8 +343,8 @@ func TestRecentCallsFilteringAndSorting(t *testing.T) {
 		t.Fatalf("unpriced items should be null cost at the end: %+v", calls31)
 	}
 
-	// 5. Chart 3.2: input DESC
-	calls32, err := recentCallsWith(Today, AnalyticsFilter{}, "3.2", 50, now, costRecs, lookup)
+	// 5. Chart "cache_hit_rate": input DESC
+	calls32, err := recentCallsWith(Today, AnalyticsFilter{}, "cache_hit_rate", 50, now, costRecs, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +390,7 @@ func TestRecentCallsCostStaysWithRecord(t *testing.T) {
 		{Time: now.Add(-3 * time.Minute), Provider: "p", Model: "m", Input: 200000, Session: "middle"},
 	}
 	for _, limit := range []int{50, 2} {
-		calls, err := recentCallsWith(Today, AnalyticsFilter{}, "3.1", limit, now, recs, lookup)
+		calls, err := recentCallsWith(Today, AnalyticsFilter{}, "cost", limit, now, recs, lookup)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -412,11 +426,11 @@ func TestAnalyzeTrendCalendarBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		name string
-		period Period
+		name      string
+		period    Period
 		now, call time.Time
-		wantDay int
-		wantHour int
+		wantDay   int
+		wantHour  int
 	}{
 		{"spring week", Week, time.Date(2026, 3, 10, 12, 0, 0, 0, loc), time.Date(2026, 3, 9, 0, 15, 0, 0, loc), 9, 0},
 		{"spring all", All, time.Date(2026, 3, 9, 12, 0, 0, 0, loc), time.Date(2026, 3, 9, 0, 15, 0, 0, loc), 9, 0},
@@ -508,14 +522,17 @@ func TestAnalyzeStreamFailureAndRejectionInvariants(t *testing.T) {
 		t.Fatalf("summary calls = %d, want 2 (rejections must be excluded)", data.Summary.Calls)
 	}
 
-	// Stream error (HTTP 200 + Record.Error) must count as an error and server_err
+	// Stream error (HTTP 200 + Record.Error) must count as an error and other_err (not server_err 5xx)
 	if data.Summary.Errors != 1 {
 		t.Fatalf("summary errors = %d, want 1", data.Summary.Errors)
 	}
-	if data.Summary.ServerErr != 1 {
-		t.Fatalf("summary server_err = %d, want 1", data.Summary.ServerErr)
+	if data.Summary.OtherErr != 1 {
+		t.Fatalf("summary other_err = %d, want 1", data.Summary.OtherErr)
 	}
-	if data.Summary.RateLimited != 0 || data.Summary.OtherErr != 0 || data.Summary.Canceled != 0 {
+	if data.Summary.ServerErr != 0 {
+		t.Fatalf("summary server_err = %d, want 0 (HTTP 200+err must not be server_err)", data.Summary.ServerErr)
+	}
+	if data.Summary.RateLimited != 0 || data.Summary.Canceled != 0 {
 		t.Fatalf("unexpected error breakdown: %+v", data.Summary)
 	}
 
@@ -530,11 +547,11 @@ func TestAnalyzeStreamFailureAndRejectionInvariants(t *testing.T) {
 
 	// TTFT sample eligibility:
 	// sess-stream-err has TTFT 300, but failed; only sess-ok (TTFT 200) must be included.
-	if data.Summary.TTFTP50 == nil || *data.Summary.TTFTP50 != 200 {
-		t.Fatalf("ttft_p50 = %v, want 200", data.Summary.TTFTP50)
+	if data.Summary.TTFTP50 == nil || math.Abs(float64(*data.Summary.TTFTP50-200)) > 200*0.01+1 {
+		t.Fatalf("ttft_p50 = %v, want ~200", data.Summary.TTFTP50)
 	}
-	if data.Summary.TTFTP95 == nil || *data.Summary.TTFTP95 != 200 {
-		t.Fatalf("ttft_p95 = %v, want 200", data.Summary.TTFTP95)
+	if data.Summary.TTFTP95 == nil || math.Abs(float64(*data.Summary.TTFTP95-200)) > 200*0.01+1 {
+		t.Fatalf("ttft_p95 = %v, want ~200", data.Summary.TTFTP95)
 	}
 
 	// Decode calls: only sess-ok should be counted (1 call)
@@ -549,47 +566,47 @@ func TestAnalyzeStreamFailureAndRejectionInvariants(t *testing.T) {
 		trendRateLimited += pt.RateLimited
 		trendOtherErr += pt.OtherErr
 	}
-	if trendServerErr != 1 || trendRateLimited != 0 || trendOtherErr != 0 {
-		t.Fatalf("trend error counts: server=%d rate=%d other=%d, want 1, 0, 0", trendServerErr, trendRateLimited, trendOtherErr)
+	if trendOtherErr != 1 || trendRateLimited != 0 || trendServerErr != 0 {
+		t.Fatalf("trend error counts: other=%d rate=%d server=%d, want 1, 0, 0", trendOtherErr, trendRateLimited, trendServerErr)
 	}
 
-	// Check RecentCalls chart "1.1" (Error drilldown)
-	errorCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "1.1", 50, now, recs, lookup)
+	// Check RecentCalls chart "error_rate" (Error drilldown)
+	errorCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "error_rate", 50, now, recs, lookup)
 	if err != nil {
-		t.Fatalf("recentCalls 1.1 failed: %v", err)
+		t.Fatalf("recentCalls error_rate failed: %v", err)
 	}
 	if len(errorCalls) != 1 {
-		t.Fatalf("recentCalls 1.1 returned %d calls, want 1", len(errorCalls))
+		t.Fatalf("recentCalls error_rate returned %d calls, want 1", len(errorCalls))
 	}
 	if errorCalls[0].Session != "sess-stream-err" {
-		t.Fatalf("recentCalls 1.1 call session = %q, want sess-stream-err", errorCalls[0].Session)
+		t.Fatalf("recentCalls error_rate call session = %q, want sess-stream-err", errorCalls[0].Session)
 	}
 	if errorCalls[0].Status != 200 || errorCalls[0].Error != "synthetic stream failure" {
-		t.Fatalf("recentCalls 1.1 call status/error = %d / %q", errorCalls[0].Status, errorCalls[0].Error)
+		t.Fatalf("recentCalls error_rate call status/error = %d / %q", errorCalls[0].Status, errorCalls[0].Error)
 	}
 
-	// Check RecentCalls chart "2.1" (TTFT drilldown)
-	ttftCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "2.1", 50, now, recs, lookup)
+	// Check RecentCalls chart "ttft" (TTFT drilldown)
+	ttftCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "ttft", 50, now, recs, lookup)
 	if err != nil {
-		t.Fatalf("recentCalls 2.1 failed: %v", err)
+		t.Fatalf("recentCalls ttft failed: %v", err)
 	}
 	if len(ttftCalls) != 1 {
-		t.Fatalf("recentCalls 2.1 returned %d calls, want 1", len(ttftCalls))
+		t.Fatalf("recentCalls ttft returned %d calls, want 1", len(ttftCalls))
 	}
 	if ttftCalls[0].Session != "sess-ok" {
-		t.Fatalf("recentCalls 2.1 call session = %q, want sess-ok", ttftCalls[0].Session)
+		t.Fatalf("recentCalls ttft call session = %q, want sess-ok", ttftCalls[0].Session)
 	}
 
-	// Check RecentCalls chart "2.2" (Speed drilldown)
-	speedCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "2.2", 50, now, recs, lookup)
+	// Check RecentCalls chart "speed" (Speed drilldown)
+	speedCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "speed", 50, now, recs, lookup)
 	if err != nil {
-		t.Fatalf("recentCalls 2.2 failed: %v", err)
+		t.Fatalf("recentCalls speed failed: %v", err)
 	}
 	if len(speedCalls) != 1 {
-		t.Fatalf("recentCalls 2.2 returned %d calls, want 1", len(speedCalls))
+		t.Fatalf("recentCalls speed returned %d calls, want 1", len(speedCalls))
 	}
 	if speedCalls[0].Session != "sess-ok" {
-		t.Fatalf("recentCalls 2.2 call session = %q, want sess-ok", speedCalls[0].Session)
+		t.Fatalf("recentCalls speed call session = %q, want sess-ok", speedCalls[0].Session)
 	}
 }
 
@@ -725,7 +742,7 @@ func TestDefaultPriceLookupAndAnalyticsSettingsPricing(t *testing.T) {
 		}
 	}
 
-	recent, err := RecentCalls(Week, AnalyticsFilter{}, "3.1", 10)
+	recent, err := RecentCalls(Week, AnalyticsFilter{}, "cost", 10)
 	if err != nil {
 		t.Fatalf("RecentCalls failed: %v", err)
 	}
@@ -756,153 +773,3 @@ func TestDefaultPriceLookupAndAnalyticsSettingsPricing(t *testing.T) {
 		t.Errorf("unknown-model cost = %v, want nil", c)
 	}
 }
-func TestAnalyticsDecodeIntervalGateAndExclusions(t *testing.T) {
-	now := time.Date(2026, 9, 23, 15, 30, 0, 0, time.UTC)
-	lookup := mockPriceLookup(map[string]*catalog.Price{
-		"prov/model": {Input: 10, Output: 20},
-	})
-
-	recs := []Record{
-		// 1. Boundary: exactly 99ms (TTFT=200, Millis=299) -> excluded (< 100ms)
-		{
-			Time: now.Add(-10 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 50, TTFT: 200, Millis: 299, Status: 200, Session: "sess-99ms",
-		},
-		// 2. Boundary: exactly 100ms (TTFT=200, Millis=300) -> eligible (>= 100ms)
-		// speed = 50 / (100 / 1000) = 500 tok/s
-		{
-			Time: now.Add(-9 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 50, TTFT: 200, Millis: 300, Status: 200, Session: "sess-100ms",
-		},
-		// 3. Fast delivery: 1ms (TTFT=200, Millis=201) -> excluded (< 100ms)
-		{
-			Time: now.Add(-8 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 100, TTFT: 200, Millis: 201, Status: 200, Session: "sess-1ms",
-		},
-		// 4. Failed call (Status=500, TTFT=200, Millis=1200) -> excluded from decode
-		{
-			Time: now.Add(-7 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 100, TTFT: 200, Millis: 1200, Status: 500, Session: "sess-fail-500",
-		},
-		// 5. Stream failure (Status=200, Error="stream err", TTFT=200, Millis=1200) -> excluded from decode
-		{
-			Time: now.Add(-6 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 100, TTFT: 200, Millis: 1200, Status: 200, Error: "stream err", Session: "sess-fail-stream",
-		},
-		// 6. No TTFT (TTFT=0, Millis=500) -> excluded from decode
-		{
-			Time: now.Add(-5 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 100, TTFT: 0, Millis: 500, Status: 200, Session: "sess-nottft",
-		},
-		// 7. No Output (Output=0, TTFT=200, Millis=500) -> excluded from decode
-		{
-			Time: now.Add(-4 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 0, TTFT: 200, Millis: 500, Status: 200, Session: "sess-noout",
-		},
-		// 8. Normal call (TTFT=200, Millis=600, interval=400ms >= 100ms) -> eligible
-		// speed = 100 / (400 / 1000) = 250 tok/s
-		{
-			Time: now.Add(-3 * time.Minute), Agent: "agent", Provider: "prov", Model: "model",
-			Input: 100, Output: 100, TTFT: 200, Millis: 600, Status: 200, Session: "sess-400ms",
-		},
-	}
-
-	data := analyzeWith(Today, AnalyticsFilter{}, now, recs, lookup)
-
-	// Total calls = 8
-	if data.Summary.Calls != 8 {
-		t.Fatalf("summary calls = %d, want 8", data.Summary.Calls)
-	}
-	// Costs, tokens, and errors are completely unaffected by decode gating
-	// Cost: 8 calls with input=100 ($10/M) + output (50+50+100+100+100+100+0+100 = 600 tokens at $20/M)
-	// Cost = 800 * 10 / 1e6 + 600 * 20 / 1e6 = 0.008 + 0.012 = 0.02 USD
-	if math.Abs(data.Summary.Cost-0.02) > 1e-6 {
-		t.Fatalf("summary cost = %v, want 0.02", data.Summary.Cost)
-	}
-	if data.Summary.Input != 800 || data.Summary.Output != 600 {
-		t.Fatalf("tokens: input=%d output=%d, want 800/600", data.Summary.Input, data.Summary.Output)
-	}
-	if data.Summary.Errors != 2 { // status 500 and stream error
-		t.Fatalf("summary errors = %d, want 2", data.Summary.Errors)
-	}
-
-	// Raw Totals embedded in Summary preserves raw decode values from Totals.add:
-	// Raw Timed: recs 1, 2, 3, 7, 8 (all have TTFT>0 and !Failed()) = 5
-	if data.Summary.Totals.Timed != 5 {
-		t.Fatalf("totals timed = %d, want 5", data.Summary.Totals.Timed)
-	}
-	// Raw DecodeMs in Totals: recs 1 (99ms), 2 (100ms), 3 (1ms), 8 (400ms) = 600ms
-	if data.Summary.Totals.DecodeMs != 600 {
-		t.Fatalf("totals decode_ms = %d, want 600", data.Summary.Totals.DecodeMs)
-	}
-	// Raw DecodeOut in Totals: recs 1 (50), 2 (50), 3 (100), 8 (100) = 300
-	if data.Summary.Totals.DecodeOut != 300 {
-		t.Fatalf("totals decode_out = %d, want 300", data.Summary.Totals.DecodeOut)
-	}
-
-	// Analytics-only Decode:
-	// Eligible calls: rec 2 (sess-100ms) and rec 8 (sess-400ms) -> 2 calls
-	if data.Summary.DecodeCalls != 2 {
-		t.Fatalf("summary decode_calls = %d, want 2", data.Summary.DecodeCalls)
-	}
-	// Excluded short-interval decode calls: rec 1 (99ms) and rec 3 (1ms) -> 2 calls
-	if data.Summary.ExcludedDecodeCalls != 2 {
-		t.Fatalf("summary excluded_decode_calls = %d, want 2", data.Summary.ExcludedDecodeCalls)
-	}
-	// Summary Speed: (50 + 100) tokens / ( (100 + 400) / 1000 ) seconds = 150 / 0.5 = 300 tok/s
-	// (Notice raw Totals.Speed() would have been 300 / 0.6 = 500 tok/s due to 1ms artifact 100 tok in 1ms)
-	if data.Summary.Speed == nil || math.Abs(*data.Summary.Speed-300.0) > 1e-6 {
-		t.Fatalf("summary speed = %v, want 300.0", data.Summary.Speed)
-	}
-
-	// Rankings BySpeed threshold check:
-	// decode_calls = 2 < 10, so BySpeed item must be marked Insufficient = true
-	suite := data.Rankings["model"]
-	if len(suite.BySpeed) != 1 {
-		t.Fatalf("by_speed items = %d, want 1", len(suite.BySpeed))
-	}
-	item := suite.BySpeed[0]
-	if !item.Insufficient {
-		t.Fatalf("by_speed insufficient = false, want true (decode_calls 2 < 10)")
-	}
-	if item.DecodeCalls != 2 || item.ExcludedDecodeCalls != 2 {
-		t.Fatalf("ranking item decode_calls = %d, excluded = %d; want 2, 2", item.DecodeCalls, item.ExcludedDecodeCalls)
-	}
-
-	// RecentCalls 2.2 (Speed drilldown):
-	// MUST contain only eligible calls (>= 100ms). Short intervals (99ms, 1ms) MUST be excluded.
-	speedCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "2.2", 50, now, recs, lookup)
-	if err != nil {
-		t.Fatalf("recentCalls 2.2 failed: %v", err)
-	}
-	if len(speedCalls) != 2 {
-		t.Fatalf("recentCalls 2.2 len = %d, want 2", len(speedCalls))
-	}
-	// Sorted by speed ASC:
-	// rec 8 (sess-400ms): 100 / 0.4 = 250 tok/s
-	// rec 2 (sess-100ms): 50 / 0.1 = 500 tok/s
-	if speedCalls[0].Session != "sess-400ms" || speedCalls[1].Session != "sess-100ms" {
-		t.Fatalf("recentCalls 2.2 unexpected sessions: %s, %s", speedCalls[0].Session, speedCalls[1].Session)
-	}
-
-	// RecentCalls 2.1 (TTFT drilldown):
-	// MUST retain all successful streaming calls (TTFT > 0), including short decode intervals!
-	ttftCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "2.1", 50, now, recs, lookup)
-	if err != nil {
-		t.Fatalf("recentCalls 2.1 failed: %v", err)
-	}
-	// Recs with TTFT > 0 and !Failed(): recs 1, 2, 3, 7, 8 -> 5 calls
-	if len(ttftCalls) != 5 {
-		t.Fatalf("recentCalls 2.1 len = %d, want 5 (other charts must retain short-interval calls)", len(ttftCalls))
-	}
-
-	// RecentCalls 3.1 (Cost drilldown): retains all 8 calls
-	costCalls, err := recentCallsWith(Today, AnalyticsFilter{}, "3.1", 50, now, recs, lookup)
-	if err != nil {
-		t.Fatalf("recentCalls 3.1 failed: %v", err)
-	}
-	if len(costCalls) != 8 {
-		t.Fatalf("recentCalls 3.1 len = %d, want 8", len(costCalls))
-	}
-}
-

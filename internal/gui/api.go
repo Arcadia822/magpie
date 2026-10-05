@@ -1016,6 +1016,7 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		in.RedactRules = cur.RedactRules                 // the masking rules, set on their own
 		// used or left is the Usage page's toggle as much as Settings', set on its own
 		in.QuotaLeft = cur.QuotaLeft
+		in.MaskAccounts = cur.MaskAccounts
 		in.UsageOrder = cur.UsageOrder // the Usage page's, dragged there
 		// and what the tray panel's Allowances tab leaves out, set there
 		in.PanelUsageHidden = cur.PanelUsageHidden
@@ -1119,6 +1120,30 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		if changed && onTrayUsage != nil {
 			onTrayUsage()
+		}
+		writeJSON(rw, settingsState())
+	})
+	// whether accounts and emails are masked across the pages: Routing's,
+	// Usage's and Analytics' toggle, set on its own
+	// just the one bit, so a window can follow the toggle without the whole
+	// settings page's answer every few seconds
+	mux.HandleFunc("GET /api/settings/mask-accounts", func(rw http.ResponseWriter, r *http.Request) {
+		writeJSON(rw, struct {
+			On bool `json:"on"`
+		}{On: settings.Load().MaskAccounts})
+	})
+	// and turned: the one bit written, the whole settings page's answer back
+	mux.HandleFunc("POST /api/settings/mask-accounts", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct{ On bool }
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		s := settings.Load()
+		s.MaskAccounts = in.On
+		if err := settings.Save(s); err != nil {
+			fail(rw, err)
+			return
 		}
 		writeJSON(rw, settingsState())
 	})

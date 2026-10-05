@@ -3123,6 +3123,7 @@ async function load(again) {
       if (view === "library") window.loadLibrary?.();
       if (view === "plugins") window.loadPlugins?.();
       if (view === "sessions") window.loadSessionsPage?.();
+      if (view === "analytics") window.renderAnalytics?.();
     }
     tintPanel();
     tintTitleBar();
@@ -18065,6 +18066,9 @@ function applyPrefs(s, rate) {
     quotaLeft = !!s.quotaLeft;
     if (applyPrefs.painted) renderQuotas();
   }
+  if (typeof s.maskAccounts === "boolean" && typeof window.applyAccountMaskPrefs === "function") {
+    window.applyAccountMaskPrefs(s.maskAccounts);
+  }
   // the rate comes in /api/settings' answer (s.fx) or, from /api/state,
   // beside the settings rather than in them (rate): a cost drawn at start,
   // before Settings is ever opened, needs it from there (#212: cny still
@@ -20406,7 +20410,7 @@ function savePrefs(body) {
     // what is saved, a choice that failed put back
     const spoke = applyPrefs(prefs);
     renderSettings();
-    if (spoke) { renderAgents(); providers = null; usage = null; }
+    if (spoke) { renderAgents(); providers = null; usage = null; if (view === "analytics") window.renderAnalytics?.(); }
     if (!failed) status(t("Saved"), "ok", 1500);
   }));
   return prefsQueue;
@@ -20699,7 +20703,7 @@ for (const v of document.querySelectorAll(".view")) {
   }, { passive: true });
 }
 
-async function show(v) {
+async function show(v, restore = false) {
   // a page gateway mode leaves out (a link to it, an address kept) opens Providers
   if (gatewayMode && GATEWAY_HIDES.includes(v)) v = "providers";
   if (v !== view) {
@@ -20718,13 +20722,16 @@ async function show(v) {
       window.discardLibrary?.();
     }
   }
+  if (typeof window.unmountRoutingInline === "function") window.unmountRoutingInline();
+  if (v !== "routing" && typeof window.cancelOpenRoute === "function") window.cancelOpenRoute();
   view = v;
-  const title = ({ agents: "Agents", providers: "Providers", gateway: "Gateway", routing: "Routing", usage: "Usage", sessions: "Sessions", library: "Library", plugins: "Plugins", settings: "Settings" })[v];
+  const title = ({ agents: "Agents", providers: "Providers", gateway: "Gateway", routing: "Routing", usage: "Usage", sessions: "Sessions", analytics: "Analytics", library: "Library", plugins: "Plugins", settings: "Settings" })[v];
   $("#pageTitle").dataset.en = title;
   $("#pageTitle").textContent = t(title);
   if (mode === "window") {
+    const navView = v === "analytics" ? "usage" : v;
     for (const b of $("#nav").querySelectorAll("button")) {
-      const on = b.dataset.view === v;
+      const on = b.dataset.view === navView;
       b.classList.toggle("on", on);
       if (on) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
     }
@@ -20747,7 +20754,7 @@ async function show(v) {
   if (v === "sessions") window.loadSessionsPage?.()?.then(back);
   if (v === "analytics") {
     const p = typeof period === "string" ? period : "30d";
-    window.loadAnalytics?.(p)?.then?.(back) || back();
+    window.loadAnalytics?.(p, restore)?.then?.(back) || back();
   }
   syncTitle();
   syncURL();
