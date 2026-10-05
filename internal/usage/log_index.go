@@ -37,6 +37,7 @@ type logSnapshot struct {
 	hash         string // SHA-256 of the log's first off bytes, the ones parsed
 	digest       []byte // the hash's running state, which the next parse continues
 	version      uint64
+	epoch        uint64
 	blocks       []*rowChunk
 	first        time.Time
 	keyProviders map[string]bool
@@ -47,6 +48,7 @@ var logIndex struct {
 	snapshot *logSnapshot
 	version  uint64
 	reads    int // how many times the file was opened to be parsed, for the tests
+	epoch    uint64
 }
 
 var logIndexNow = time.Now
@@ -88,7 +90,13 @@ func readLogSnapshot() *logSnapshot {
 		logIndex.version++
 	}
 
-	next := &logSnapshot{path: path, info: info, settled: settled, version: logIndex.version, keyProviders: map[string]bool{}}
+	if err != nil || old == nil || old.path != path {
+		logIndex.epoch++
+	} else if !unchanged {
+		// File modified: advance epoch unless continued append below preserves it
+		logIndex.epoch++
+	}
+	next := &logSnapshot{path: path, info: info, settled: settled, version: logIndex.version, epoch: logIndex.epoch, keyProviders: map[string]bool{}}
 	if err != nil {
 		logIndex.snapshot = next
 		return next
@@ -105,6 +113,11 @@ func readLogSnapshot() *logSnapshot {
 		next.off, next.first = old.off, old.first
 		next.blocks = slices.Clone(old.blocks)
 		next.keyProviders = maps.Clone(old.keyProviders)
+		next.epoch = old.epoch
+	} else if !unchanged {
+		next.epoch = logIndex.epoch
+	} else {
+		next.epoch = old.epoch
 	}
 	logIndex.reads++
 	f, err := os.Open(path)
@@ -222,6 +235,32 @@ func (s *logSnapshot) visit(since time.Time, fn func(Record)) {
 			p := &c.Rows[i]
 			if !p.Time.Before(since) {
 				fn(c.row(i).Record)
+			}
+		}
+	}
+}
+
+func (s *logSnapshot) visitAfter(order int64, since time.Time, fn func(r Record, rowOrder int64)) {
+	for _, packed := range s.blocks {
+		if !since.IsZero() && packed.Latest.Before(since) {
+			continue
+		}
+		// Block end skip: if EndOrder <= order, the entire block is before the cursor.
+		if packed.EndOrder > 0 && packed.EndOrder <= order {
+			continue
+		}
+		c := packed.unpack()
+		if c == nil || len(c.Rows) == 0 {
+			continue
+		}
+		if c.Rows[len(c.Rows)-1].Order <= order {
+			continue
+		}
+		for i, p := range c.Rows {
+			if p.Order > order {
+				if since.IsZero() || !p.Time.Before(since) {
+					fn(c.row(i).Record, p.Order)
+				}
 			}
 		}
 	}

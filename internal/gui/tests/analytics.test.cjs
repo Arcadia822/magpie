@@ -1,15 +1,19 @@
 // Run with Node's test runner and Playwright on the module path; see README.md.
-// Tests Issue #213 Analytics UI behavior:
+// Tests Analytics UI behavior:
 // 1. Navigation & initial load with period preservation from Usage, back navigation with scroll/tabs preserved
 // 2. Mode switching and mutually exclusive filter behavior (actual selection & assertion of request params)
 // 3. Stale response mitigation (disordered network responses)
 // 4. Drilldown to independent page view (compact chart on left, 50 calls list on right)
-// 5. Right pane in-place switch to 7-group detail view and return to calls list
+// 5. A call's route opens the real Routing stage/story inline in the right pane: the Analytics
+//    page stays put (#view-analytics visible, #view-routing hidden, left ranking kept); the
+//    return button restores the calls list with period, dimension, filters, entity, scroll and
+//    masking, and locale/currency re-renders keep the open detail
 // 6. Return from drilldown to dashboard preserving mode, filters, period and scroll position
-// 7. 659px desktop width prioritizes two columns without horizontal overflow
+// 7. 659px desktop width keeps two columns with no horizontal overflow, the inline graph fits
+//    its right column, and graph nodes keep their widths without overlapping
 // 8. Visible error state on calls fetch failure (no fake empty)
 // 9. Zero data handling ('—' display, cost KPI empty/unknown states, no fake bars)
-// 10. Locale switching (zh/en) covering notes, chips, tail notes, details, and Hide Emails masking
+// 10. Locale switching (zh/en) covering notes, chips, tail notes, details, and shared account masking
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -42,6 +46,7 @@ const mockAnalyticsData = {
     server_err: 2,
     other_err: 1,
     canceled: 1,
+    cancel_rate: 0.0083,
     ttft_p50: 850,
     ttft_p95: 1950,
     decode_calls: 80,
@@ -50,171 +55,139 @@ const mockAnalyticsData = {
   },
   rankings: {
     model: {
-      by_error_rate: [
-        {
-          key: "gpt-5.5",
-          metric_val: 0.08,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.6,
+      summaries: {
+        "gpt-5.5": {
           calls: 60,
+          errors: 5,
           rate_limited: 3,
           server_err: 1,
           other_err: 1,
+          canceled: 0,
           error_rate: 0.08,
-          cost: 8.50,
-        },
-        {
-          key: "claude-3-7-sonnet",
-          metric_val: 0.03,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: true,
-          share: 0.4,
-          calls: 40,
-          rate_limited: 0,
-          server_err: 1,
-          other_err: 0,
-          error_rate: 0.025,
-          cost: 6.00,
-        },
-        {
-          key: "zero-err-model",
-          metric_val: 0.0,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.2,
-          calls: 20,
-          rate_limited: 0,
-          server_err: 0,
-          other_err: 0,
-          error_rate: 0.0,
-          cost: 1.00,
-        },
-        {
-          key: "tiny-model",
-          metric_val: 0.0,
-          insufficient: true,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.0,
-          calls: 2,
-          rate_limited: 0,
-          server_err: 0,
-          other_err: 0,
-          error_rate: 0.0,
-          cost: 0.0,
-        },
-      ],
-      by_ttft: [
-        {
-          key: "gpt-5.5",
-          metric_val: 1950,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.6,
           timed: 45,
           ttft_p50: 820,
           ttft_p95: 1950,
-        },
-        {
-          key: "claude-3-7-sonnet",
-          metric_val: 1200,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: true,
-          share: 0.4,
-          timed: 35,
-          ttft_p50: 650,
-          ttft_p95: 1200,
-        },
-      ],
-      by_speed: [
-        {
-          key: "claude-3-7-sonnet",
-          metric_val: 45.2,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.4,
-          decode_calls: 35,
-          speed: 45.2,
-        },
-        {
-          key: "gpt-5.5",
-          metric_val: 68.0,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.6,
           decode_calls: 40,
           speed: 68.0,
-        },
-      ],
-      by_cost: [
-        {
-          key: "gpt-5.5",
-          metric_val: 8.50,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.586,
           cost: 8.50,
-        },
-        {
-          key: "claude-3-7-sonnet",
-          metric_val: 6.00,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: true,
-          share: 0.414,
-          cost: 6.00,
-        },
-      ],
-      by_cache_rate: [
-        {
-          key: "claude-3-7-sonnet",
-          metric_val: 0.25,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.4,
-          input: 60000,
-          cache_read: 20000,
-          cache_write: 5000,
-          cache_hit_rate: 0.25,
-        },
-        {
-          key: "gpt-5.5",
-          metric_val: 0.40,
-          insufficient: false,
-          unknown_cache: false,
-          has_unpriced: false,
-          share: 0.6,
+          unpriced: 0,
           input: 90000,
+          output: 25000,
           cache_read: 60000,
           cache_write: 7000,
           cache_hit_rate: 0.40,
         },
-        {
-          key: "zero-cache-model",
-          metric_val: null,
-          insufficient: false,
-          unknown_cache: true,
-          has_unpriced: false,
-          share: 0.0,
-          input: 12000,
+        "claude-3-7-sonnet": {
+          calls: 40,
+          errors: 1,
+          rate_limited: 0,
+          server_err: 1,
+          other_err: 0,
+          canceled: 1,
+          error_rate: 0.025,
+          timed: 35,
+          ttft_p50: 650,
+          ttft_p95: 1200,
+          decode_calls: 35,
+          speed: 45.2,
+          cost: 6.00,
+          unpriced: 1,
+          input: 60000,
+          output: 20000,
+          cache_read: 20000,
+          cache_write: 5000,
+          cache_hit_rate: 0.25,
+        },
+        "zero-err-model": {
+          calls: 20,
+          errors: 0,
+          rate_limited: 0,
+          server_err: 0,
+          other_err: 0,
+          canceled: 0,
+          error_rate: 0.0,
+          timed: 20,
+          ttft_p50: 500,
+          ttft_p95: 900,
+          decode_calls: 20,
+          speed: 80.0,
+          cost: 1.00,
+          unpriced: 0,
+          input: 10000,
+          output: 5000,
+          cache_read: 5000,
+          cache_write: 1000,
+          cache_hit_rate: 0.33,
+        },
+        "tiny-model": {
+          calls: 2,
+          errors: 0,
+          rate_limited: 0,
+          server_err: 0,
+          other_err: 0,
+          canceled: 0,
+          error_rate: 0.0,
+          timed: 2,
+          ttft_p50: 300,
+          ttft_p95: 400,
+          decode_calls: 2,
+          speed: 100.0,
+          cost: 0.0,
+          unpriced: 0,
+          input: 500,
+          output: 200,
           cache_read: 0,
           cache_write: 0,
           cache_hit_rate: 0.0,
         },
+        "zero-cache-model": {
+          calls: 10,
+          errors: 0,
+          rate_limited: 0,
+          server_err: 0,
+          other_err: 0,
+          canceled: 0,
+          error_rate: 0.0,
+          timed: 10,
+          ttft_p50: 400,
+          ttft_p95: 800,
+          decode_calls: 10,
+          speed: 60.0,
+          cost: 0.50,
+          unpriced: 0,
+          input: 12000,
+          output: 2000,
+          cache_read: 0,
+          cache_write: 0,
+          cache_hit_rate: 0.0,
+        },
+      },
+      by_error_rate: [
+        { key: "gpt-5.5", metric_val: 0.08, insufficient: false, share: 0.6 },
+        { key: "claude-3-7-sonnet", metric_val: 0.025, insufficient: false, share: 0.4 },
+        { key: "zero-err-model", metric_val: 0.0, insufficient: false, share: 0.2 },
+        { key: "tiny-model", metric_val: 0.0, insufficient: true, share: 0.0 },
+      ],
+      by_ttft: [
+        { key: "gpt-5.5", metric_val: 1950, insufficient: false, share: 0.6 },
+        { key: "claude-3-7-sonnet", metric_val: 1200, insufficient: false, share: 0.4 },
+      ],
+      by_speed: [
+        { key: "claude-3-7-sonnet", metric_val: 45.2, insufficient: false, share: 0.4 },
+        { key: "gpt-5.5", metric_val: 68.0, insufficient: false, share: 0.6 },
+      ],
+      by_cost: [
+        { key: "gpt-5.5", metric_val: 8.50, insufficient: false, has_unpriced: false, share: 0.586 },
+        { key: "claude-3-7-sonnet", metric_val: 6.00, insufficient: false, has_unpriced: true, share: 0.414 },
+      ],
+      by_cache_rate: [
+        { key: "claude-3-7-sonnet", metric_val: 0.25, insufficient: false, unknown_cache: false, share: 0.4 },
+        { key: "gpt-5.5", metric_val: 0.40, insufficient: false, unknown_cache: false, share: 0.6 },
+        { key: "zero-cache-model", metric_val: null, insufficient: false, unknown_cache: true, share: 0.0 },
       ],
     },
-    provider: { by_error_rate: [], by_ttft: [], by_speed: [], by_cost: [], by_cache_rate: [] },
-    agent: { by_error_rate: [], by_ttft: [], by_speed: [], by_cost: [], by_cache_rate: [] },
+    provider: { summaries: {}, by_error_rate: [], by_ttft: [], by_speed: [], by_cost: [], by_cache_rate: [] },
+    agent: { summaries: {}, by_error_rate: [], by_ttft: [], by_speed: [], by_cost: [], by_cache_rate: [] },
   },
   error_trend: [
     { time: "2026-09-29T10:00:00Z", label: "09-29", rate_limited: 2, server_err: 1, other_err: 0 },
@@ -230,7 +203,19 @@ const mockAnalyticsData = {
 const mockCallsData = {
   calls: Array.from({ length: 50 }, (_, i) => {
     const hasStreamErr = i === 1; // 2nd item has HTTP 200 + stream error
+    // Give items valid route_ids; item 4 has no route_id (missing route record); item 7 has route_id 404 (non-existent route)
+    let route_id = 123;
+    if (i === 4) {
+      route_id = undefined;
+    } else if (i === 7) {
+      route_id = 404;
+    } else if (i === 8) {
+      route_id = 999;
+    } else {
+      route_id = 123;
+    }
     return {
+      route_id,
       t: new Date(Date.parse("2026-09-30T10:14:22.318Z") - i * 60000).toISOString(),
       agent: i % 2 === 0 ? "codex" : "claude-code",
       provider: i % 2 === 0 ? "openai" : "anthropic",
@@ -243,7 +228,7 @@ const mockCallsData = {
       reasoning: i % 2 === 0 ? 320 : 0,
       effort: i % 2 === 0 ? "medium" : "none",
       ms: i === 2 ? 2000 : (2840 + i * 20),
-      ttft_ms: i === 2 ? 1950 : (1950 + i * 15), // i === 2 has interval 50ms < 100ms
+      ttft_ms: i === 2 ? 1950 : (1950 + i * 15),
       status: i % 5 === 0 ? 429 : 200,
       err: hasStreamErr ? "synthetic stream failure" : undefined,
       session: i === 0
@@ -293,6 +278,8 @@ const emptyAnalyticsData = {
   filters: { model: [], provider: [], agent: [] },
 };
 
+// The account-mask setting every fake window shares, as the real settings API does.
+const maskServer = { accounts: false };
 const state = {
   agents: [{ id: "codex", name: "Codex", path: "/test/config.toml", fields: [] }],
   profiles: [],
@@ -315,11 +302,61 @@ function createServer(customData = mockAnalyticsData, delay = 0) {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
 
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs = {lang:"en",theme:"light",web:true};' });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs = {lang:"en",theme:"light",web:true,maskAccounts:' + maskServer.accounts + ",maskAccountsSet:true};" });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json(state);
+    if (url.pathname === "/api/state") return json({ ...state, settings: { ...state.settings, maskAccounts: maskServer.accounts } });
+    if (url.pathname === "/api/settings/mask-accounts") {
+      if (route.request().method() === "GET") return json({ on: maskServer.accounts });
+      const body = JSON.parse(route.request().postData() || "{}");
+      if (typeof body.on === "boolean") maskServer.accounts = body.on;
+      return json({ ...state.settings, maskAccounts: maskServer.accounts });
+    }
+    if (url.pathname === "/api/settings") {
+      const body = JSON.parse(route.request().postData() || "{}");
+      if (typeof body.maskAccounts === "boolean") maskServer.accounts = body.maskAccounts;
+      return json({ ...state.settings, maskAccounts: maskServer.accounts });
+    }
+    if (url.pathname === "/api/gateway/trace") {
+      return json({ mine: false, seq: 0, routes: [], totals: { requests: 0, rerouted: 0, errors: 0 }, now: new Date().toISOString() });
+    }
+    if (url.pathname === "/api/gateway/history") return json({ days: [], routes: [], cut: false });
+    if (url.pathname === "/api/gateway/route") {
+      const routeId = url.searchParams.get("id");
+      if (routeId === "123") {
+        return json({
+          id: 123,
+          time: "2026-09-30T10:14:22.318Z",
+          agent: "codex",
+          model: "gpt-5.5",
+          provider: "openai",
+          order: [
+            { id: "openai", provider: "openai", name: "OpenAI", model: "gpt-5.5", kind: "provider", routing: "order" },
+            { id: "acct-long", provider: "openai", name: "Enterprise account", model: "gpt-5.5", kind: "account", who: "extremely-long-enterprise-account-name-for-stress@corp.example", routing: "order" },
+          ],
+          tries: [{ id: "openai", model: "gpt-5.5", start: "2026-09-30T10:14:22.318Z", done: true, status: 200, ms: 50 }],
+          done: true,
+          status: 200,
+          ms: 50,
+        });
+      }
+      if (routeId === "999") {
+        return json({
+          id: 999,
+          time: "2026-09-30T10:06:22.318Z",
+          agent: "claude-code",
+          model: "claude-3-7-sonnet",
+          provider: "anthropic",
+          order: [{ id: "anthropic", provider: "anthropic", name: "Claude", model: "claude-3-7-sonnet", kind: "provider", routing: "order" }],
+          tries: [{ id: "anthropic", model: "claude-3-7-sonnet", start: "2026-09-30T10:06:22.318Z", done: true, status: 200, ms: 80 }],
+          done: true,
+          status: 200,
+          ms: 80,
+        });
+      }
+      return route.fulfill({ status: 404, body: "Routing history for this request is no longer available." });
+    }
     if (url.pathname === "/api/groups") return json({ groups: [] });
-    if (url.pathname === "/api/providers") return json({ providers: [], gateway: { running: true } });
+    if (url.pathname === "/api/providers") return json({ providers: [], presets: [], excluded: [], models: [], gateway: { running: true } });
     if (url.pathname === "/api/usage/quotas") return json([]);
     if (url.pathname === "/api/usage") return json({ totals: { calls: 120, cost: 14.50 }, agents: [], models: [] });
     if (url.pathname === "/api/usage/requests") {
@@ -359,8 +396,31 @@ function createServer(customData = mockAnalyticsData, delay = 0) {
   };
 }
 
+// True when no inline route is on screen: either its story is gone, or its wrapper is hidden.
+async function inlineReleased(page) {
+  if (await page.locator("#anDrillRight .rt-steps").count() === 0) return true;
+  return page.locator("#anDrillRouting").isHidden();
+}
+
+// Drill into the calls list from whatever the current dimension shows: a KPI tile in All mode,
+// or the first ranking bar in a By Model/By Provider view.
+async function openDrill(page) {
+  let entry = page.locator('#anBody button[data-chart-id]').first();
+  if (!(await entry.isVisible().catch(() => false))) {
+    await page.locator('#anDim button.opt').first().click();
+    entry = page.locator('#anBody button[data-chart-id]').first();
+  }
+  await entry.click();
+  await page.locator("#anDrillPage:not([hidden])").waitFor();
+}
+
+// The inline return control, in the loaded routing (#rtBackAnalytics) or the error state.
+function inlineBack(page) {
+  return page.locator("#anDrillRouting #rtBackAnalytics, #anDrillRight .an-drill-route-back");
+}
+
 for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium", "webkit"])) {
-  test(engine + ": analytics navigation, rendering, drilldown page, detail switch and return state", async (t) => {
+  test(engine + ": analytics Routing story and return state", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await launchBrowser(engine);
     const context = await browser.newContext({ viewport: { width: 1100, height: 750 } });
@@ -369,6 +429,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
     const errors = [];
     page.on("pageerror", (e) => errors.push(e.message));
+    const routeLookups = [];
+    const historyLookups = [];
+    page.on("request", (req) => {
+      const url = new URL(req.url());
+      if (url.pathname === "/api/gateway/route") routeLookups.push(url);
+      if (url.pathname === "/api/gateway/history") historyLookups.push(url);
+    });
     await page.route("**/*", createServer());
 
     t.after(async () => {
@@ -386,31 +453,34 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(await page.locator("#anControls").isVisible(), "anControls must be rendered");
     assert(await page.locator("#anBack").isVisible(), "anBack must be rendered");
 
-    // 2. Mode switching: All -> By Model
+    // 2. Set Period to 7 days, Mode to By Model, and Filter provider to openai
+    const period7dBtn = page.locator("#anPeriod button").filter({ hasText: "7 days" });
+    await period7dBtn.click();
+    await page.waitForFunction(() => document.querySelector("#anPeriod button.opt.on")?.textContent?.includes("7 days"));
+    assert.match(await page.locator("#anPeriod button.opt.on").textContent(), /7 days/, "7 days period must be active");
+
     const modelDimBtn = page.locator("#anDim button").filter({ hasText: "By Model" });
     await modelDimBtn.click();
     await page.locator(".an-bars").first().waitFor();
+    assert.equal((await page.locator("#anDim button.opt.on").textContent()).trim(), "By Model", "By Model dimension must be active");
+
+    const provFilterWrap = page.locator('.an-filter-wrap[data-filter-dim="provider"]');
+    await provFilterWrap.locator(".an-filter-btn").click();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
+    await page.locator(".proto-menu.an-filter-menu .pm-item").filter({ hasText: "openai" }).click();
+    await page.waitForFunction(() => {
+      const txt = document.querySelector('.an-filter-wrap[data-filter-dim="provider"] .an-filter-btn')?.textContent || "";
+      return txt.includes("openai");
+    });
+    assert.match(await provFilterWrap.locator(".an-filter-btn").textContent(), /openai/, "provider filter must be openai");
 
     const barRows = page.locator(".an-bar-row");
+    await barRows.first().waitFor();
     assert((await barRows.count()) > 0, "must render bar rows in By Model mode");
 
-    // Verify no folded sections rendered (unpriced/insufficient/unknown_cache hidden directly)
-    const foldToggles = page.locator(".an-fold-toggle");
-    assert.equal(await foldToggles.count(), 0, "should not render folded toggle sections");
-    const foldFooters = page.locator(".an-fold-footer");
-    assert.equal(await foldFooters.count(), 0, "should not render fold footers");
-    // Verify insufficient items (e.g. tiny-model) are not in ranking bars
-    const tinyModelBar = page.locator(".an-bar-row").filter({ hasText: "tiny-model" });
-    assert.equal(await tinyModelBar.count(), 0, "insufficient item tiny-model should not be displayed in ranking");
-    // 3. Click entity to navigate to independent drill-down page (not an in-place drawer)
-    const firstBar = barRows.first();
-    await firstBar.click();
+    // Click bar to enter drilldown page
+    await barRows.first().click();
     await page.locator("#anDrillPage:not([hidden])").waitFor();
-
-    // Dashboard body and controls should be hidden, drill page visible
-    assert(await page.locator("#anDrillPage").isVisible(), "independent drill page must be visible");
-    assert(await page.locator("#anBody").isHidden(), "main dashboard body must be hidden");
-    assert(await page.locator("#anControls").isHidden(), "main dashboard controls must be hidden");
 
     // Left compact chart & right calls list
     assert(await page.locator("#anDrillLeft").isVisible(), "left compact chart must be visible");
@@ -420,6 +490,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const callItems = page.locator(".an-call-item");
     await callItems.first().waitFor();
     assert((await callItems.count()) > 0, "calls items must be listed in right pane");
+    assert.equal(routeLookups.length, 0, "loading the usage list must not fetch Routing records");
     // 4. Test real non-zero scrolling on 50 calls list:
     // Scroll down the view to non-zero scrollTop (e.g. 250px)
     await page.evaluate(() => {
@@ -430,28 +501,109 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const scrollBeforeDetail = await page.evaluate(() => document.querySelector("#view-analytics").scrollTop);
     assert(scrollBeforeDetail > 100, `view must have scrolled to non-zero, got ${scrollBeforeDetail}`);
 
-    // Click 6th call item: opens detail view, and detail view automatically scrolls view to top (0)
-    const sixthItem = callItems.nth(5);
-    await sixthItem.click();
-    await page.locator(".an-call-detail-box").waitFor();
-    assert(await page.locator(".an-call-detail-box").isVisible(), "call detail card must replace right pane");
-    assert(await page.locator(".an-calls-list").isHidden(), "calls list must be replaced by detail");
-    assert(await page.locator("#anDrillLeft").isVisible(), "left compact chart must remain visible during detail view");
+    // 4b. Verify calls item with missing route_id (i=4): disabled with title/aria-label, click does nothing
+    const noRouteItem = callItems.nth(4);
+    const noRouteTitle = await noRouteItem.getAttribute("title");
+    const noRouteAria = await noRouteItem.getAttribute("aria-disabled");
+    assert.equal(noRouteAria, "true", "item with missing route_id must have aria-disabled='true'");
+    assert.match(noRouteTitle, /This call has no linked routing record\.|该记录没有关联的路由信息/, "missing route_id title check");
 
-    await page.waitForTimeout(50);
-    const scrollInDetail = await page.evaluate(() => document.querySelector("#view-analytics").scrollTop);
-    assert.equal(scrollInDetail, 0, "detail view must scroll view to top (0) so top of detail is in viewport");
 
-    // 5. Return back to Calls list: restores actual non-zero scroll position (before any reloads)
-    const backToCallsBtn = page.locator(".an-drill-return-btn");
-    await backToCallsBtn.click();
+    // Clicking disabled item sends no route query and stays on calls list
+    await noRouteItem.click({ force: true });
+    assert.equal(routeLookups.length, 0, "clicking item without route_id must send no route query");
+    assert(await page.locator("#view-routing").isHidden(), "must stay on analytics calls list when route_id is missing");
+
+    // 4c. Verify 404 route handling (i=7): the right pane shows the inline error with Retry and a
+    // way back, then Back restores the calls list; the page never leaves Analytics.
+    const route404Item = callItems.nth(7);
+    await route404Item.click();
+    const routeErrBox = page.locator("#anDrillRight .an-drill-state-box.an-err");
+    await routeErrBox.waitFor();
+    assert(await page.locator("#view-routing").isHidden(), "404 route lookup must not navigate away from analytics");
+    assert(await page.locator("#anDrillRight .an-drill-route-back").isVisible(), "404 must offer a way back to the calls list");
+    assert(await page.locator("#anDrillRight .an-drill-retry-btn").isVisible(), "404 must offer a retry");
+    assert.match(await routeErrBox.textContent(), /Routing history for this request is no longer available|路由历史已不可用/, "inline error should report routing unavailable");
+    await page.locator("#anDrillRight .an-drill-route-back").click();
     await page.locator(".an-calls-list").waitFor();
-    assert(await page.locator(".an-calls-list").isVisible(), "must return to calls list");
-    assert(await page.locator(".an-call-detail-box").isHidden(), "detail box must be gone");
-    await page.waitForFunction((expected) => Math.abs(document.querySelector("#view-analytics").scrollTop - expected) < 5, scrollBeforeDetail);
-    const scrollRestored = await page.evaluate(() => document.querySelector("#view-analytics").scrollTop);
-    assert(Math.abs(scrollRestored - scrollBeforeDetail) < 5, `return to calls list must restore non-zero scroll position (expected ~${scrollBeforeDetail}, got ${scrollRestored})`);
+    assert(await page.locator(".an-calls-list").isVisible(), "calls list must be restored after a 404");
 
+    // The target is absent from the history list; the single-record lookup still opens it.
+    let analyticsFetches = 0;
+    let callsFetches = 0;
+    page.on("request", (req) => {
+      const u = req.url();
+      if (u.includes("/api/analytics?")) analyticsFetches++;
+      if (u.includes("/api/analytics/calls?")) callsFetches++;
+    });
+
+    const firstCallItem = callItems.nth(5);
+    const scrollAtClick = await page.locator("#view-analytics").evaluate((v) => v.scrollTop);
+    await firstCallItem.focus();
+    await firstCallItem.press("Enter");
+
+    // The route opens in place: the Analytics page stays put, the Routing page stays hidden, and
+    // the real Routing stage/story is mounted inside the right pane.
+    const inlineRouting = page.locator("#anDrillRouting");
+    await inlineRouting.waitFor();
+    assert(await page.locator("#view-analytics").isVisible(), "analytics page must stay visible while a route is open");
+    assert(await page.locator("#view-routing").isHidden(), "the Routing page must not be shown for an inline route");
+    assert(await page.locator("#anDrillLeft").isVisible(), "left ranking must stay visible while a route is open");
+    assert.match(await page.locator("#anDrillLeft").textContent(), /gpt-5\.5/, "left ranking keeps the selected entity while a route is open");
+    await page.locator("#anDrillRight .rt-steps").waitFor();
+    assert(await page.locator("#anDrillRight .rt-stage").isVisible(), "the inline Routing stage must render in the right pane");
+    const inlineSteps = page.locator("#anDrillRight .rt-steps");
+    assert.match(await inlineSteps.textContent(), /gpt-5\.5/, "inline routing story must display the model from the route fixture");
+    const activeWhileOpen = await page.locator(".an-call-item.active").count();
+    const listWhileOpen = await page.locator("#anDrillRight .an-calls-list").count();
+    assert(activeWhileOpen === 1 || listWhileOpen === 0, "the opened row is marked active, or the inline route replaces the list");
+    assert.equal(routeLookups.at(-1).searchParams.get("id"), "123", "inline route lookup uses the call's route id");
+    assert.equal(routeLookups.at(-1).searchParams.get("day"), "2026-09-30", "inline route lookup names the call's day");
+    assert(!historyLookups.some((url) => url.searchParams.get("day")), "an inline route needs no whole-day history read");
+
+    // The return button lives in the inline view.
+    const backToAnalyticsBtn = inlineBack(page);
+    await backToAnalyticsBtn.waitFor();
+    assert(await backToAnalyticsBtn.isVisible(), "inline routing must show the 'Back to analytics calls' return button");
+
+    // A replay inside the inline drill keeps the selected story and stays mounted.
+    const inlineReplay = page.locator("#anDrillRouting button").filter({ hasText: /^Replay$/ });
+    if (await inlineReplay.count()) {
+      await inlineReplay.first().click();
+      const inlineStop = page.locator("#anDrillRouting button").filter({ hasText: /^Stop replay$/ });
+      if (await inlineStop.count()) await inlineStop.first().click();
+      assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /gpt-5\.5/, "stopping a replay keeps the selected story inline");
+      assert(await page.locator("#anDrillRouting").isVisible(), "the inline drill stays mounted after a replay");
+    }
+
+    const preReturnAnalyticsFetches = analyticsFetches;
+    const preReturnCallsFetches = callsFetches;
+
+    // Clicking the return button restores the calls list in place, without leaving the page.
+    await backToAnalyticsBtn.click();
+    await page.locator(".an-calls-list").waitFor();
+    assert(await page.locator("#view-analytics").isVisible(), "analytics page must remain visible after return");
+    assert(await page.locator("#view-routing").isHidden(), "Routing page stays hidden after an inline return");
+    const stepsAfterReturn = await page.locator("#anDrillRight .rt-steps").count();
+    const wrapperHidden = await page.locator("#anDrillRouting").isHidden();
+    assert(stepsAfterReturn === 0 || wrapperHidden, "the inline route must be released after return");
+    assert(await page.locator(".an-calls-list").isVisible(), "calls list must be restored");
+    assert.equal(await page.locator(".an-call-item.active").count(), 1, "return must keep the opened call row marked active");
+
+    // Must NOT re-fetch analytics or calls when returning to the list
+    assert.equal(analyticsFetches, preReturnAnalyticsFetches, "return from an inline route must not re-fetch analytics");
+    assert.equal(callsFetches, preReturnCallsFetches, "return from an inline route must not re-fetch calls");
+
+    // Verify period (7 days), dimension (By Model), filter (provider = openai) and selected entity are strictly preserved
+    assert.match(await page.locator("#anPeriod button.opt.on").textContent(), /7 days/, "7 days period must remain active after return");
+    assert.equal((await page.locator("#anDim button.opt.on").textContent()).trim(), "By Model", "By Model dimension must remain active after return");
+    assert.match(await provFilterWrap.locator(".an-filter-btn").textContent(), /openai/, "provider filter must remain openai after return");
+    assert(await page.locator("#anDrillLeft").isVisible(), "drill left panel with selected entity must remain active after return");
+    assert.match(await page.locator("#anDrillLeft").textContent(), /gpt-5\.5/, "selected entity gpt-5.5 must remain active after return");
+
+    // Verify scroll position was restored
+    await page.waitForFunction((expected) => Math.abs(document.querySelector("#view-analytics").scrollTop - expected) < 5, scrollAtClick);
+    assert(Math.abs(await page.locator("#view-analytics").evaluate((v) => v.scrollTop) - scrollAtClick) < 5);
     // Verify mini chart: zero-err-model (error_rate: 0, calls: 20) renders seg width 0% while positive models have > 0%
     const miniRows = page.locator(".an-drill-mini-row");
     const zeroErrMiniRow = miniRows.filter({ hasText: "zero-err-model" });
@@ -462,84 +614,90 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const posSegWidth = await positiveMiniRow.locator(".an-drill-mini-seg").evaluate((el) => el.style.width);
     assert.notEqual(posSegWidth, "0%", "entity with positive metric must have mini chart segment width > 0%");
 
-    // Entity switch resets callsScrollTop: scroll calls list, open detail, switch to another left entity,
-    // verify view scrollTop is not restored to the old list position (stays at 0/top)
-    await page.evaluate(() => {
-      document.querySelector("#view-analytics").scrollTop = 220;
-    });
-    await page.waitForTimeout(50);
-    const listScrollBeforeDetail2 = await page.evaluate(() => document.querySelector("#view-analytics").scrollTop);
-    assert(listScrollBeforeDetail2 > 100, `list must be scrolled before detail, got ${listScrollBeforeDetail2}`);
-    // Open detail
-    await callItems.nth(3).click();
-    await page.locator(".an-call-detail-box").waitFor();
-    await page.waitForFunction(() => document.querySelector("#view-analytics").scrollTop === 0);
-    // Click another entity in left panel while in detail
-    await zeroErrMiniRow.click();
-    await page.locator(".an-calls-list").waitFor();
-    await page.waitForTimeout(100);
-    const scrollAfterEntitySwitch = await page.evaluate(() => document.querySelector("#view-analytics").scrollTop);
-    assert.equal(scrollAfterEntitySwitch, 0, "switching entity must reset callsScrollTop so list is at top (0), not restored to old position");
-
-    // 5b. Verify HTTP 200 stream error badge and detail explanation
+    // 5b. Verify HTTP 200 stream error badge (i=1)
     const secondItem = callItems.nth(1);
     const badge2 = secondItem.locator(".an-st-badge");
     assert.equal(await badge2.textContent(), "200");
-    assert(await badge2.evaluate((el) => el.classList.contains("st-5xx")), "HTTP 200 with stream error must have error badge class st-5xx");
-    await secondItem.click();
-    await page.locator(".an-call-detail-box").waitFor();
-    await page.waitForFunction(() => document.querySelector("#view-analytics").scrollTop === 0);
-    const explanationRow = page.locator(".an-detail-row", { hasText: "Explanation" });
-    assert.equal((await explanationRow.locator("span").nth(1).textContent()).trim(), "synthetic stream failure", "detail explanation must show stream error");
-    const tpsRow = page.locator(".an-detail-row", { hasText: "TPS" });
-    assert.equal((await tpsRow.locator("span").nth(1).textContent()).trim(), "—", "TPS must be blanked (—) for failed call with stream error");
-    // Plain HTTP has no Clipboard API: exercise the existing command fallback.
-    await page.route("**/api/copy", (route) => route.fulfill({ status: 503, body: "" }));
-    await page.evaluate(() => {
-      Object.defineProperty(navigator, "clipboard", { configurable: true, value: undefined });
-      document.execCommand = (command) => command === "copy";
-    });
-    await page.locator(".an-sess-copy-btn").click();
-    await page.waitForFunction(() => document.querySelector(".an-sess-copy-btn").classList.contains("done"));
-    await page.evaluate(() => { document.execCommand = () => false; });
-    await page.locator(".an-sess-copy-btn").click();
-    await page.waitForFunction(() => document.querySelector("#status").classList.contains("err"));
-    assert(!(await page.locator("#status").textContent()).includes(mockCallsData.calls[1].session), "copy failure must not reveal the session ID");
-    await page.locator(".an-drill-return-btn").click();
-    await page.locator(".an-calls-list").waitFor();
+    assert(await badge2.evaluate((el) => el.classList.contains("st-err") && !el.classList.contains("st-5xx")), "HTTP 200 with stream error must have error badge class st-err and not st-5xx");
 
-    // Verify third item (i=2, short interval 50ms < 100ms) displays interval note
-    const thirdItem = page.locator(".an-call-item").nth(2);
-    await thirdItem.click();
-    await page.locator(".an-call-detail-box").waitFor();
-    const tpsShortRow = page.locator(".an-detail-row", { hasText: "TPS" });
-    const tpsShortText = (await tpsShortRow.locator("span").nth(1).textContent()).trim();
-    assert(tpsShortText.includes("100ms") || tpsShortText === "—", `TPS for short interval (<100ms) must show short interval note: ${tpsShortText}`);
-    await page.locator(".an-drill-return-btn").click();
-    await page.locator(".an-calls-list").waitFor();
-    // 6. The drill page's own Hide accounts, at the header's right end, masks
-    // an account after a call's host ("host as email") in the detail.
-    await page.locator(".an-call-item").nth(5).click();
-    await page.locator(".an-call-detail-box").waitFor();
+    // Also assert call items bottom do not contain literal 'null' text
+    const bottomText = await secondItem.locator(".an-call-item-bottom").textContent();
+    assert(!bottomText.includes("null"), `call item bottom must not render literal 'null' string: ${bottomText}`);
+    // 5d. Masking on the drill page is shared, and an inline route is masked in place.
     const maskBtn = page.locator("#anDrillMask");
     const headBox = await page.locator(".an-drill-page-head").boundingBox();
     const maskBox = await maskBtn.boundingBox();
     assert(Math.abs(headBox.x + headBox.width - (maskBox.x + maskBox.width)) < 2, "drill mask button must sit at the header row's right end");
+    const maskOnPosted = page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/api/settings/mask-accounts"));
     await maskBtn.click();
     await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
-    const hostRow = page.locator(".an-detail-row", { hasText: "api.openai.com as" });
-    await hostRow.locator(".pii").waitFor();
-    assert(!(await hostRow.innerText()).includes("corp.example"), "host row must not show the account email");
-    assert.equal(await hostRow.locator(".pii").evaluate((e) => e.dataset.raw), "host.owner@corp.example");
-    assert(!(await page.locator(".an-call-detail-box").innerText()).includes("test.org"), "session email must be masked too");
+    await maskOnPosted;
+    assert.equal(maskServer.accounts, true, "masking persists to the shared settings API");
 
-    // Same setting as Routing's: off again from the drill page
+    // Open the inline route again with masking on: its accounts are masked, and the state survives return.
+    await firstCallItem.click();
+    await inlineRouting.waitFor();
+    await page.locator("#anDrillRight .rt-steps").waitFor();
+    assert(await page.locator("#anDrillRight .pii").count() > 0, "inline routing must mask the account it draws");
+    assert.equal(await maskBtn.getAttribute("aria-pressed"), "true", "drill mask stays on while the inline route is open");
+    await backToAnalyticsBtn.click();
+    await page.locator(".an-calls-list").waitFor();
+    assert.equal(await maskBtn.getAttribute("aria-pressed"), "true", "mask must be preserved across an inline route return");
+    assert.match(await maskBtn.getAttribute("title"), /click to show them|点一下即可显示/, "mask button keeps its 'how to show them' tooltip");
+
+    // Locale switch while the inline route is open: the return button and the detail re-render in place.
+    await firstCallItem.click();
+    await inlineRouting.waitFor();
+    await page.locator("#anDrillRight .rt-steps").waitFor();
+    await page.evaluate(() => window.setLocale("zh"));
+    assert.match(await page.locator("#anDrillRouting .rt-back-analytics, #anDrillRouting #rtBackAnalytics").textContent(), /返回分析列表/, "return button must render in the active locale");
+    assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /gpt-5\.5/, "locale switch must keep the open route detail");
+    await backToAnalyticsBtn.click();
+    await page.locator(".an-calls-list").waitFor();
+    assert.equal(await callItems.nth(4).getAttribute("title"), "该记录没有关联的路由信息", "disabled call tooltip follows the locale");
+    await page.evaluate(() => window.setLocale("en"));
+    const maskOffPosted = page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/api/settings/mask-accounts"));
     await maskBtn.click();
     await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "false");
-    assert((await hostRow.innerText()).includes("host.owner@corp.example"), "unmasking restores the host account");
+    await maskOffPosted;
+    assert.equal(maskServer.accounts, false, "unmasking persists to the shared settings API");
+
+    // 5e. Leaving Analytics for another page releases the inline route, and the Usage page still
+    // opens the full Routing page through openRoute (no inline mount there, no return button).
+    await firstCallItem.click();
+    await inlineRouting.waitFor();
+    await page.evaluate(() => window.show("usage"));
+    await page.locator("#view-usage:not([hidden])").waitFor();
+    assert(await inlineReleased(page), "leaving Analytics must release the inline route");
+    assert.equal(await page.locator(".rt-back-analytics, #rtBackAnalytics").count(), 0, "the standalone Routing page shows no analytics return button");
+
+    // The Routing page must not keep the drilled story once the inline drill is left.
+    await page.evaluate(() => window.show("routing"));
+    await page.locator("#view-routing:not([hidden])").waitFor();
+    await page.waitForTimeout(50);
+    assert(await page.locator('#view-routing .rt-log').isHidden(), "an empty Routing page hides the drilled story");
+    assert.equal(await page.locator('#view-routing .rt-accts li.idle').count(), 1, "Routing restores its empty stage");
+    await page.evaluate(() => window.show("usage"));
+    await page.locator("#view-usage:not([hidden])").waitFor();
+
+    await page.evaluate(() => window.openRoute(123, "2026-09-30T10:14:22.318Z"));
+    await page.locator("#view-routing:not([hidden])").waitFor();
+    assert(await page.locator("#view-analytics").isHidden(), "Usage openRoute still switches to the Routing page");
+    await page.locator("#view-routing .rt-steps").waitFor();
+    assert.match(await page.locator("#view-routing .rt-steps").textContent(), /gpt-5\.5/, "Usage openRoute still shows the route story");
+    assert.equal(await page.locator(".rt-back-analytics, #rtBackAnalytics").count(), 0, "Usage openRoute must not show the analytics return button");
+    await page.evaluate(() => window.show("usage"));
+    await page.locator("#view-usage:not([hidden])").waitFor();
+
+    // Re-entering analytics fresh from Usage resets drill; re-drill and verify dashboard return
+    await page.evaluate(() => window.show("analytics"));
+    await page.locator("#view-analytics:not([hidden])").waitFor();
+    // In fresh analytics, By Model is selected; drill into first bar
+    await page.locator(".an-bar-row").first().click();
+    await page.locator("#anDrillPage:not([hidden])").waitFor();
 
     // 7. Return to main dashboard: preserves mode, filters, period and scroll
-    const backToDashBtn = page.locator(".an-drill-back");
+    const backToDashBtn = page.locator("#anBack");
     await backToDashBtn.click();
     await page.locator("#anBody:not([hidden])").waitFor();
     assert(await page.locator("#anBody").isVisible(), "dashboard body must be restored");
@@ -555,14 +713,13 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await backBtn.click();
     await page.locator("#view-usage:not([hidden])").waitFor();
     assert(await page.locator("#view-usage").isVisible(), "must navigate back to usage view");
-
     assert.equal(errors.length, 0, `no page errors occurred: ${errors.join(", ")}`);
   });
 
   test(engine + ": 659px desktop width prioritizes two columns without horizontal overflow", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await launchBrowser(engine);
-    // Test 659px desktop width constraint as specified in requirements
+    // Test 659px desktop width constraint
     const context = await browser.newContext({ viewport: { width: 659, height: 750 } });
     const page = await context.newPage();
     page.setDefaultTimeout(6000);
@@ -619,16 +776,94 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     });
     assert(!listHorizScroll, "659px calls list must not trigger horizontal scrollbar");
 
-    // Open the detail card with long session and long host
+    // 659px check: the route opens inline in the right column; the graph must fit its narrow pane
+    // (about 401px) with real node widths, no overlap and no clipping.
     await page.locator(".an-call-item").first().click();
-    await page.locator(".an-call-detail-box").waitFor();
+    await page.locator("#anDrillRouting").waitFor();
+    assert(await page.locator("#view-analytics").isVisible(), "659px analytics page must stay visible for an inline route");
+    assert(await page.locator("#view-routing").isHidden(), "659px Routing page must stay hidden for an inline route");
+    await page.locator("#anDrillRight .rt-steps").waitFor();
+    assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /gpt-5\.5/, "659px inline routing story must show the model");
+    // A long account label is drawn, so the narrow column is really exercised.
+    assert.match(await page.locator("#anDrillRight .rt-accts").textContent(), /extremely-long-enterprise-account-name-for-stress/, "659px graph must draw the long account label");
 
-    // Verify no horizontal overflow in detail view even with extremely long session / host strings
-    const detailHorizScroll = await page.evaluate(() => {
+    const pageOverflow = await page.evaluate(() => {
       const v = document.querySelector("#view-analytics");
-      return v.scrollWidth > v.clientWidth;
+      return v.scrollWidth - v.clientWidth;
     });
-    assert(!detailHorizScroll, "659px detail view with long session/host must not trigger horizontal scrollbar");
+    assert(pageOverflow <= 0, `659px analytics page must not overflow horizontally, got ${pageOverflow}`);
+    const rightOverflow = await rightBox.evaluate((e) => e.scrollWidth - e.clientWidth);
+    assert(rightOverflow <= 0, `659px right pane must not overflow horizontally, got ${rightOverflow}`);
+
+    const geom = await rightBox.evaluate((pane) => {
+      const stage = pane.querySelector(".rt-stage");
+      const nodes = [
+        ...pane.querySelectorAll(".rt-srcs .rt-node"),
+        ...pane.querySelectorAll(".rt-hub"),
+        ...pane.querySelectorAll(".rt-accts li"),
+      ].map((n) => { const r = n.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, w: r.width }; });
+      const sr = stage.getBoundingClientRect();
+      return { pane: pane.clientWidth, stage: { l: sr.left, r: sr.right, w: sr.width }, nodes };
+    });
+    assert(geom.nodes.length >= 2, `inline graph must draw more than one node, got ${geom.nodes.length}`);
+    assert(geom.stage.w <= geom.pane + 1, `inline stage must fit the right pane, stage ${geom.stage.w} pane ${geom.pane}`);
+    for (const n of geom.nodes) {
+      assert(n.w > 0, `every inline graph node must keep a positive width, got ${n.w}`);
+      assert(n.l >= geom.stage.l - 1 && n.r <= geom.stage.r + 1, `node must stay inside the stage: ${JSON.stringify(n)}`);
+    }
+    // No two nodes may overlap unless they stack vertically (a very narrow stage falls back to rows).
+    for (let i = 0; i < geom.nodes.length; i++) {
+      for (let j = i + 1; j < geom.nodes.length; j++) {
+        const a = geom.nodes[i], b = geom.nodes[j];
+        const hOverlap = a.l < b.r - 1 && b.l < a.r - 1;
+        const vOverlap = a.t < b.b - 1 && b.t < a.b - 1;
+        assert(!(hOverlap && vOverlap), `inline graph nodes must not overlap: ${JSON.stringify(a)} vs ${JSON.stringify(b)}`);
+      }
+    }
+
+    // Return to the analytics calls list and verify no horizontal scroll.
+    await page.locator("#anDrillRouting .rt-back-analytics, #anDrillRouting #rtBackAnalytics").click();
+    await page.locator(".an-calls-list").waitFor();
+    const restoredOverflow = await page.evaluate(() => {
+      const v = document.querySelector("#view-analytics");
+      return v.scrollWidth - v.clientWidth;
+    });
+    assert(restoredOverflow <= 0, "659px restored calls list must not trigger a horizontal scrollbar");
+  });
+
+  test(engine + ": a route read failure keeps the analytics calls and a retry opens the inline route", async (t) => {
+    const browser = await launchBrowser(engine);
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    let failing = true;
+    await page.route("**/*", (route) => {
+      const url = new URL(route.request().url());
+      if (failing && url.pathname === "/api/gateway/route") {
+        return route.fulfill({ status: 503, body: "synthetic routing read failure" });
+      }
+      return createServer()(route);
+    });
+    await page.goto("http://magpie.test/?view=analytics");
+    await openDrill(page);
+    const call = page.locator(".an-call-item").first();
+
+    // The failure is shown inline, replacing the calls list, without leaving Analytics.
+    await call.click();
+    const errBox = page.locator("#anDrillRight .an-drill-state-box.an-err");
+    await errBox.waitFor();
+    assert(await page.locator("#view-analytics").isVisible(), "a route failure must keep the analytics page");
+    assert(await page.locator("#view-routing").isHidden(), "a route failure must not show the Routing page");
+    assert.match(await errBox.textContent(), /synthetic routing read failure/, "the route failure is shown inline");
+    assert(await page.locator("#anDrillRight .an-drill-retry-btn").isVisible(), "the inline error offers a retry");
+    assert(await page.locator("#anDrillRight .an-drill-route-back").isVisible(), "the inline error offers a way back");
+
+    // A retry opens the inline route.
+    failing = false;
+    await page.locator("#anDrillRight .an-drill-retry-btn").click();
+    await page.locator("#anDrillRouting").waitFor();
+    await page.locator("#anDrillRight .rt-steps").waitFor();
+    assert(await page.locator("#view-analytics").isVisible(), "the retried route stays on the analytics page");
+    assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /gpt-5\.5/, "the retried route draws its story inline");
   });
 
   test(engine + ": out-of-order calls responses during entity switching and navigation cancellation", async (t) => {
@@ -638,22 +873,69 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const page = await context.newPage();
     page.setDefaultTimeout(6000);
 
-    let slowEntityCallsResolve = null;
+    let entityRace = true;
+    let slowEntityCallsResolve;
+    let signalEntityStarted;
+    const entityStarted = new Promise((resolve) => { signalEntityStarted = resolve; });
+    let slowRouteLookupResolve;
+    let signalRouteStarted;
+    const routeRequests = [];
 
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/gateway/route") {
+        const id = url.searchParams.get("id");
+        routeRequests.push(id);
+        if (id === "123") {
+          const pending = new Promise((resolve) => { slowRouteLookupResolve = resolve; });
+          signalRouteStarted();
+          await pending;
+          return route.fulfill({
+            json: {
+              id: 123,
+              time: "2026-09-30T10:14:22.318Z",
+              agent: "codex",
+              model: "gpt-5.5",
+              provider: "openai",
+              order: [{ id: "openai", provider: "openai", name: "OpenAI", model: "gpt-5.5", kind: "provider", routing: "order" }],
+              tries: [{ id: "openai", model: "gpt-5.5", start: "2026-09-30T10:14:22.318Z", done: true, status: 200, ms: 50 }],
+              done: true,
+              status: 200,
+              ms: 50,
+            },
+          });
+        }
+        if (id === "999") {
+          // Fast route lookup for request B
+          return route.fulfill({
+            json: {
+              id: 999,
+              time: "2026-09-30T10:06:22.318Z",
+              agent: "claude-code",
+              model: "claude-3-7-sonnet",
+              provider: "anthropic",
+              order: [{ id: "anthropic", provider: "anthropic", name: "Claude", model: "claude-3-7-sonnet", kind: "provider", routing: "order" }],
+              tries: [{ id: "anthropic", model: "claude-3-7-sonnet", start: "2026-09-30T10:06:22.318Z", done: true, status: 200, ms: 80 }],
+              done: true,
+              status: 200,
+              ms: 80,
+            },
+          });
+        }
+      }
       if (url.pathname === "/api/analytics/calls") {
         const modelParam = url.searchParams.get("model");
-        if (modelParam === "gpt-5.5") {
-          // Delay gpt-5.5 response
-          await new Promise((r) => { slowEntityCallsResolve = r; });
+        if (modelParam === "gpt-5.5" && entityRace) {
+          const pending = new Promise((resolve) => { slowEntityCallsResolve = resolve; });
+          signalEntityStarted();
+          await pending;
           return route.fulfill({
             json: {
               calls: [{ ...mockCallsData.calls[0], agent: "stale-gpt-agent" }],
             },
           });
         }
-        if (modelParam === "claude-3-7-sonnet") {
+        if (modelParam === "claude-3-7-sonnet" && entityRace) {
           // Fast response for second entity
           return route.fulfill({
             json: {
@@ -678,26 +960,78 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.locator(".an-bar-row").first().click();
     await page.locator("#anDrillPage:not([hidden])").waitFor();
 
-    // Rapidly switch entity on left panel to second entity
+    // The older entity result must not replace the selected entity's calls.
+    await entityStarted;
     const miniRows = page.locator(".an-drill-mini-row");
     await miniRows.nth(1).click();
+    await page.waitForFunction(() => document.querySelector(".an-call-item-agent")?.textContent === "fast-correct-agent");
+    slowEntityCallsResolve();
     await page.waitForTimeout(100);
+    assert.equal(await page.locator(".an-call-item-agent").first().textContent(), "fast-correct-agent");
+    entityRace = false;
+    await miniRows.first().click();
+    const callItems = page.locator(".an-call-item");
+    await callItems.nth(8).waitFor();
 
-    // Now resolve the older slow response for gpt-5.5
-    if (slowEntityCallsResolve) slowEntityCallsResolve();
+    // A route in flight shows its return control immediately, so the reader can leave while it loads.
+    let routeAStartedPromise = new Promise((resolve) => { signalRouteStarted = resolve; });
+    await callItems.first().click();
+    await routeAStartedPromise;
+    assert.equal(routeRequests.length, 1, "one route lookup per click");
+    await page.locator("#anDrillRouting #rtBackAnalytics").waitFor();
+    assert(await page.locator("#anDrillRouting #rtBackAnalytics").isVisible(), "a loading route offers its return button");
+
+    // Leaving via the inline return cancels route A.
+    await page.locator("#anDrillRouting #rtBackAnalytics").click();
+    await page.locator(".an-calls-list").waitFor();
+
+    // B (route 999) opens fast; the canceled A resolving late must not overwrite it.
+    await callItems.nth(8).click();
+    await page.locator("#anDrillRouting").waitFor();
+    await page.locator("#anDrillRight .rt-steps").waitFor();
+    assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /claude-3-7-sonnet/, "the fast route must draw its story inline");
+    assert(await page.locator("#view-analytics").isVisible(), "an inline route keeps the analytics page");
+    assert(await page.locator("#view-routing").isHidden(), "an inline route never shows the Routing page");
+
+    slowRouteLookupResolve();
     await page.waitForTimeout(200);
+    assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /claude-3-7-sonnet/, "a canceled route resolving late must not overwrite the active inline route");
 
-    // Verify stale response was discarded: right panel should show fast-correct-agent
-    const displayedAgent = await page.locator(".an-call-item-agent").first().textContent();
-    assert.equal(displayedAgent, "fast-correct-agent", "stale out-of-order calls response must be discarded by drillSeq");
+    // Return to the calls list (still on the analytics page).
+    await page.locator("#anDrillRouting #rtBackAnalytics").click();
+    await page.locator(".an-calls-list").waitFor();
 
-    // Now navigate away from Analytics (switch to Usage view)
+    // 3. Navigating away while a route lookup is pending cancels it: no inline route appears later.
+    routeAStartedPromise = new Promise((resolve) => { signalRouteStarted = resolve; });
+    await callItems.first().click();
+    await routeAStartedPromise;
     await page.evaluate(() => window.show("usage"));
     await page.locator("#view-usage:not([hidden])").waitFor();
+    slowRouteLookupResolve();
+    await page.waitForTimeout(100);
+    assert(await page.locator("#view-usage").isVisible(), "a late route lookup must not navigate away from Usage");
+    assert(await page.locator("#view-routing").isHidden(), "routing must remain hidden after navigating away");
+    assert(await inlineReleased(page), "a late route lookup must not mount an inline route");
 
-    // Verify analytics view is hidden and drill was cleanly invalidated
-    assert(await page.locator("#view-analytics").isHidden(), "analytics view should be hidden");
+    // 4. Changing the drilled entity also cancels a pending route lookup.
+    await page.evaluate(() => window.show("analytics"));
+    await page.locator("#view-analytics:not([hidden])").waitFor();
+    await page.locator(".an-bar-row").first().click();
+    await page.locator("#anDrillPage:not([hidden])").waitFor();
+    await page.locator(".an-call-item").nth(8).waitFor();
+    routeAStartedPromise = new Promise((resolve) => { signalRouteStarted = resolve; });
+    await page.locator(".an-call-item").first().click();
+    await routeAStartedPromise;
+    // Switch the entity while route A is pending.
+    await page.locator(".an-drill-mini-row").nth(1).click();
+    await page.waitForTimeout(50);
+    slowRouteLookupResolve();
+    await page.waitForTimeout(150);
+    assert(await page.locator(".an-calls-list").isVisible(), "changing the entity keeps the calls list");
+    assert(await inlineReleased(page), "changing the entity must not mount a late inline route");
+    assert(await page.locator("#view-routing").isHidden(), "changing the entity must not show the Routing page");
   });
+
   test(engine + ": delayed analytics fetch failure does not pop error after navigating away", async (t) => {
     assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
     const browser = await launchBrowser(engine);
@@ -790,7 +1124,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.locator("#view-analytics:not([hidden])").waitFor();
     await page.locator(".an-kpi-val").first().waitFor();
 
-    // Verify zero data renders '—' for rates and cost (Issue review item #6)
+    // Verify zero data renders '—' for rates and cost
     const kpiVal = await page.locator(".an-kpi-val").first().textContent();
     assert.equal(kpiVal.trim(), "—", "empty success rate should display '—'");
 
@@ -798,20 +1132,31 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const costVal = await costTile.locator(".an-kpi-val").textContent();
     assert.equal(costVal.trim(), "—", "empty cost KPI should display '—'");
 
-    // Drill into 3.1 in empty period: left panel must also render '—', not '$0.00'
+    // Drill into cost in empty period: left panel must also render '—', not '$0.00'
     await costTile.click();
     await page.locator("#anDrillPage:not([hidden])").waitFor();
     const leftCostVal = await page.locator(".an-drill-left-kpi-val").textContent();
     assert.equal(leftCostVal.trim(), "—", "empty period in drill left card must display '—' instead of $0.00");
-    await page.locator(".an-drill-back").click();
+    await page.locator("#anBack").click();
     await page.locator("#anBody:not([hidden])").waitFor();
 
-    // Switch to Chinese locale
-    await page.evaluate(() => window.setLocale("zh"));
-    await page.waitForTimeout(200);
+    // While in analytics (English), switch to another view so the page becomes hidden.
+    await page.evaluate(() => window.show("routing"));
+    await page.locator("#view-routing:not([hidden])").waitFor();
+    assert(await page.locator("#view-analytics").isHidden(), "analytics page must be hidden");
 
-    const titleZh = await page.locator(".an-theme-title").first().textContent();
-    assert.equal(titleZh.trim(), "可靠性", `theme title must be translated to Chinese: ${titleZh}`);
+    // Change the locale while analytics is hidden.
+    await page.evaluate(() => window.setLocale("zh"));
+    await page.waitForTimeout(100);
+
+    // Return with restore = true (the view is shown again without re-fetching).
+    await page.evaluate(() => window.show("analytics", true));
+    await page.locator("#view-analytics:not([hidden])").waitFor();
+
+    // Line 1303: load(p, restore=true) returns early without re-fetching,
+    // but view must properly display updated locale (e.g. 可靠性)
+    const titleZhAfterReturn = await page.locator(".an-theme-title").first().textContent();
+    assert.equal(titleZhAfterReturn.trim(), "可靠性", "analytics view restored with restore=true must render in the newly set locale");
   });
 
   test(engine + ": mutually exclusive filters, real picker selection, and stale response mitigation", async (t) => {
@@ -854,15 +1199,21 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const filterBtns = page.locator(".an-filter-btn");
     assert.equal(await filterBtns.count(), 3, "All mode must have 3 filter dropdown buttons");
 
-    // 2. Real selection via openFilterPicker / popover (Issue review item #1)
+    // 2. Real selection via proto-menu popover
     const providerBtn = filterBtns.nth(1); // Provider filter
     await providerBtn.click();
-    await page.locator("#pop:not([hidden])").waitFor();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
 
-    // Select "openai" from picker list
-    const openaiOpt = page.locator("#pop #list li").filter({ hasText: "openai" });
+    // Second click on the same filter button closes the menu
+    await providerBtn.click();
+    assert.equal(await page.locator(".proto-menu").count(), 0, "a second click closes filter menu");
+
+    // Re-open and select "openai" from proto-menu list
+    await providerBtn.click();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
+    const openaiOpt = page.locator(".proto-menu.an-filter-menu .pm-item").filter({ hasText: "openai" });
     await openaiOpt.click();
-
+    assert.equal(await page.locator(".proto-menu").count(), 0, "picking an option closes the menu");
     // 3. Immediately switch dimension to "By Provider" to trigger a fast second request (stale race)
     const providerDimBtn = page.locator("#anDim button").filter({ hasText: "By Provider" });
     await providerDimBtn.click();
@@ -879,12 +1230,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(requestedParams.some((q) => q.includes("provider=openai")), "first request must have included provider filter");
     assert(requestedParams.some((q) => !q.includes("provider=")), "switching to By Provider must clear provider filter");
 
-    // 4. Hide accounts on: filter picker with email shows masked label in #pop, but selection requests raw value
-    await page.evaluate(() => window.show("routing"));
-    await page.locator("#rtMask").waitFor();
-    await page.locator("#rtMask").click();
-    await page.evaluate(() => window.show("analytics"));
-    await page.locator("#view-analytics:not([hidden])").waitFor();
+    // 4. Hide accounts on: the drill page's shared mask button turns masking on for every view.
+    await openDrill(page);
+    await page.locator("#anDrillMask").click();
+    await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
+    await page.locator("#anBack").click();
+    await page.locator("#anBody:not([hidden])").waitFor();
 
     // Switch to By Model so Provider filter is visible in controls
     await page.locator("#anDim button").filter({ hasText: "By Model" }).click();
@@ -892,14 +1243,14 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
     const filterWrapProv = page.locator('.an-filter-wrap[data-filter-dim="provider"]');
     await filterWrapProv.locator(".an-filter-btn").click();
-    await page.locator("#pop:not([hidden])").waitFor();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
 
-    const popListText = await page.locator("#pop #list").innerText();
+    const popListText = await page.locator(".proto-menu.an-filter-menu").innerText();
     assert(!popListText.includes("pick.owner@corp.example"), "filter picker options must not display raw email when accounts are hidden");
     assert(popListText.includes("@"), "filter picker option should show masked email stand-in");
 
     // Click the masked email option (contains @)
-    const emailOpt = page.locator("#pop #list li").filter({ hasText: "@" }).first();
+    const emailOpt = page.locator(".proto-menu.an-filter-menu .pm-item").filter({ hasText: "@" }).first();
     await emailOpt.click();
     await page.waitForTimeout(100);
 
@@ -907,12 +1258,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(lastFilterReq.includes("provider=pick.owner%40corp.example") || lastFilterReq.includes("provider=pick.owner@corp.example"),
       `selecting masked option must still request raw value, got: ${lastFilterReq}`);
 
-    // Turn off mask
-    await page.evaluate(() => window.show("routing"));
-    await page.locator("#rtMask").waitFor();
-    await page.locator("#rtMask").click();
-    await page.evaluate(() => window.show("analytics"));
-    await page.locator("#view-analytics:not([hidden])").waitFor();
+    // Turn the mask off again from the drill page's button.
+    await openDrill(page);
+    await page.locator("#anDrillMask").click();
+    await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "false");
+    await page.locator("#anBack").click();
+    await page.locator("#anBody:not([hidden])").waitFor();
 
     // 5. Dashboard request failure after successful load: roll back period and filters to shown query
     let rejectAnalytics = false;
@@ -964,7 +1315,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(lastDrillCallsUrl, "drill calls request must be made");
     assert.equal(new URL(lastDrillCallsUrl).searchParams.get("period"), shownPeriod, "drill calls must use the rolled-back shown period, not the failed 7d");
 
-    await page.locator(".an-drill-back").click();
+    await page.locator("#anBack").click();
     await page.locator("#anBody:not([hidden])").waitFor();
   });
 
@@ -1007,13 +1358,178 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(await leftKpi.isVisible(), "overall KPI card must be visible in left panel");
 
     // Clicking back button cleanly returns to dashboard
-    const backBtn = page.locator(".an-drill-back");
+    const backBtn = page.locator("#anBack");
     await backBtn.click();
     await page.locator("#anBody:not([hidden])").waitFor();
 
     assert(await page.locator("#anBody").isVisible(), "dashboard body must be visible again");
     assert(await page.locator("#anDrillPage").isHidden(), "drill page must be hidden");
     assert.equal(callsRequests, 1, "no extra calls requests triggered by clicking back");
+  });
+
+  test(engine + ": drilldown loading spinner, aria-busy, dedup, delayed empty/error cleanup and stale completion", async (t) => {
+    assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
+    const browser = await launchBrowser(engine);
+    const context = await browser.newContext({
+      viewport: { width: 1100, height: 750 },
+      reducedMotion: "reduce",
+    });
+    const page = await context.newPage();
+    page.setDefaultTimeout(6000);
+
+    let callsRequestsCount = 0;
+    let slowCallsResolve;
+    let signalSlowCallsStarted;
+    let slowCallsStarted = new Promise((resolve) => { signalSlowCallsStarted = resolve; });
+    let delayCalls = true;
+    let slowEmptyResolve;
+    let signalSlowEmptyStarted;
+    let slowErrorResolve;
+    let signalSlowErrorStarted;
+
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/analytics/calls") {
+        callsRequestsCount++;
+        const chartId = url.searchParams.get("chart_id");
+        if (delayCalls && chartId === "ttft") {
+          signalSlowCallsStarted();
+          await new Promise((resolve) => { slowCallsResolve = resolve; });
+          return route.fulfill({
+            json: {
+              calls: [{ ...mockCallsData.calls[0], agent: "slow-stale-call-agent" }],
+            },
+          });
+        }
+        if (chartId === "error_rate") {
+          return route.fulfill({
+            json: {
+              calls: [{ ...mockCallsData.calls[1], agent: "fast-active-call-agent" }],
+            },
+          });
+        }
+        if (chartId === "cost") {
+          if (signalSlowEmptyStarted) signalSlowEmptyStarted();
+          await new Promise((resolve) => { slowEmptyResolve = resolve; });
+          return route.fulfill({ json: { calls: [] } });
+        }
+        if (chartId === "cache_hit_rate") {
+          if (signalSlowErrorStarted) signalSlowErrorStarted();
+          await new Promise((resolve) => { slowErrorResolve = resolve; });
+          return route.fulfill({ status: 500, body: "delayed upstream failure" });
+        }
+      }
+      return createServer()(route);
+    });
+
+    t.after(async () => {
+      await browser.close();
+    });
+
+    await page.goto("http://magpie.test/?view=analytics");
+    await page.locator("#view-analytics:not([hidden])").waitFor();
+
+    // 1. Click TTFT P95 KPI button (chart ttft) -> slow response
+    const ttftBtn = page.locator("button.an-kpi-tile[data-chart-id='ttft']");
+    await ttftBtn.click();
+    await page.locator("#anDrillPage:not([hidden])").waitFor();
+    await slowCallsStarted;
+
+    // Verify visible spinner, aria-hidden on spinner, role=status on loadingBox, and aria-busy on #anDrillRight
+    const rightPane = page.locator("#anDrillRight");
+    assert.equal(await rightPane.getAttribute("aria-busy"), "true", "right pane must have aria-busy='true' while loading");
+
+    const loadingBox = page.locator(".an-drill-state-box[role='status']");
+    assert(await loadingBox.isVisible(), "loading box with role='status' must be visible while loading");
+
+    const spinner = loadingBox.locator(".an-spinner");
+    assert(await spinner.isVisible(), "visible spinner must appear inside loading state box");
+    assert.equal(await spinner.getAttribute("aria-hidden"), "true", "spinner must be aria-hidden decorative");
+
+    // Reduced motion verification: under reduced-motion: reduce, spinner animation is none
+    const spinnerAnim = await spinner.evaluate((el) => window.getComputedStyle(el).animationName);
+    assert.equal(spinnerAnim, "none", "spinner animation must be none under reduced motion");
+
+    // Verify no old call rows and no empty message before response arrives
+    assert.equal(await page.locator(".an-call-item").count(), 0, "no call items should be displayed during pending load");
+    assert.equal(await page.locator(".an-drill-state-box:not([role='status'])").count(), 0, "no empty or error box before response");
+
+    // 2. Click back button remains usable during loading
+    const backBtn = page.locator("#anBack");
+    assert(await backBtn.isVisible(), "back button must remain visible and usable during loading");
+
+    // 3. Same period+filter+chart pending key dedup: clicking the same pending chart KPI or retry must NOT trigger extra request
+    const reqCountBeforeDup = callsRequestsCount;
+    // Assert tile exists before click
+    const tileExists = await page.evaluate(() => Boolean(document.querySelector("button.an-kpi-tile[data-chart-id='ttft']")));
+    assert(tileExists, "chart tile ttft must exist in DOM");
+    await page.evaluate(() => {
+      document.querySelector("button.an-kpi-tile[data-chart-id='ttft']").click();
+    });
+    await page.waitForTimeout(100);
+    assert.equal(callsRequestsCount, reqCountBeforeDup, "duplicate pending request with same parameters must be deduped");
+
+    // 4. Delayed A/B stale completion:
+    // Return to dashboard and click Error Rate (chart 1.1, fast B)
+    await backBtn.click();
+    await page.locator("#anBody:not([hidden])").waitFor();
+    const errRateBtn = page.locator("button.an-single-card[data-chart-id='error_rate']");
+    await errRateBtn.click();
+    await page.locator("#anDrillPage:not([hidden])").waitFor();
+
+    // Wait for fast chart B (1.1) to complete and render
+    await page.locator(".an-call-item").first().waitFor();
+    assert.equal(await rightPane.getAttribute("aria-busy"), null, "aria-busy must be cleared after successful load");
+    assert.equal(await page.locator(".an-call-item-agent").first().textContent(), "fast-active-call-agent");
+
+    // Now resolve slow chart A (2.1)
+    slowCallsResolve();
+    await page.waitForTimeout(150);
+
+    // Stale slow A response must NOT overwrite active B response
+    assert.equal(await page.locator(".an-call-item-agent").first().textContent(), "fast-active-call-agent", "stale delayed A response must not overwrite active B calls list");
+    assert.equal(await rightPane.getAttribute("aria-busy"), null, "aria-busy must remain cleared");
+
+    // 5. Delayed Empty: test that pending spinner clears and empty state renders correctly after response
+    await backBtn.click();
+    await page.locator("#anBody:not([hidden])").waitFor();
+
+    const emptyStartedPromise = new Promise((resolve) => { signalSlowEmptyStarted = resolve; });
+    const costBtn = page.locator("button.an-kpi-tile").filter({ hasText: "Total Cost" });
+    await costBtn.click();
+    await page.locator("#anDrillPage:not([hidden])").waitFor();
+    await emptyStartedPromise;
+
+    assert.equal(await rightPane.getAttribute("aria-busy"), "true", "busy while empty request is pending");
+    assert(await page.locator(".an-spinner").isVisible(), "spinner must be visible during pending empty request");
+
+    // Resolve empty response
+    slowEmptyResolve();
+    await page.waitForFunction(() => !document.querySelector("#anDrillRight")?.getAttribute("aria-busy"));
+    assert.equal(await page.locator(".an-spinner").count(), 0, "spinner must be removed once empty response resolves");
+    assert.equal(await rightPane.getAttribute("aria-busy"), null, "aria-busy cleared on empty");
+    assert.match(await page.locator(".an-drill-state-box").textContent(), /No matching calls found/, "empty state shown");
+
+    // 6. Delayed Error: test that pending spinner clears and error state renders correctly after response
+    await backBtn.click();
+    await page.locator("#anBody:not([hidden])").waitFor();
+
+    const errorStartedPromise = new Promise((resolve) => { signalSlowErrorStarted = resolve; });
+    const cacheBtn = page.locator("button.an-kpi-tile").filter({ hasText: "Cache Hit Rate" });
+    await cacheBtn.click();
+    await page.locator("#anDrillPage:not([hidden])").waitFor();
+    await errorStartedPromise;
+
+    assert.equal(await rightPane.getAttribute("aria-busy"), "true", "busy while error request is pending");
+    assert(await page.locator(".an-spinner").isVisible(), "spinner must be visible during pending error request");
+
+    // Resolve error response
+    slowErrorResolve();
+    await page.waitForFunction(() => !document.querySelector("#anDrillRight")?.getAttribute("aria-busy"));
+    assert.equal(await page.locator(".an-spinner").count(), 0, "spinner must be removed once error response resolves");
+    assert.equal(await rightPane.getAttribute("aria-busy"), null, "aria-busy cleared on error");
+    assert(await page.locator(".an-drill-state-box.an-err").isVisible(), "error state displayed with retry button");
+    assert(await page.locator(".an-drill-retry-btn").isVisible(), "manual retry button preserved");
   });
 
   test(engine + ": bar chart geometry, tail width stability, filter clear button, and accessible tooltips", async (t) => {
@@ -1069,35 +1585,52 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       rankings: {
         ...mockAnalyticsData.rankings,
         model: {
-          ...mockAnalyticsData.rankings.model,
+          summaries: {
+            "model-short-94": {
+              calls: 100,
+              errors: 90,
+              rate_limited: 90,
+              server_err: 0,
+              other_err: 0,
+              canceled: 4,
+              error_rate: 0.94,
+              timed: 50,
+              ttft_p50: 800,
+              ttft_p95: 1500,
+              decode_calls: 50,
+              speed: 40.0,
+              cost: 1.0,
+              unpriced: 0,
+            },
+            "model-very-long-name-identifier-95": {
+              calls: 100,
+              errors: 95,
+              rate_limited: 95,
+              server_err: 0,
+              other_err: 0,
+              canceled: 0,
+              error_rate: 0.95,
+              timed: 50,
+              ttft_p50: 800,
+              ttft_p95: 1500,
+              decode_calls: 50,
+              speed: 40.0,
+              cost: 1.0,
+              unpriced: 0,
+            },
+          },
           by_error_rate: [
             {
               key: "model-short-94",
               metric_val: 0.94,
               insufficient: false,
-              unknown_cache: false,
-              has_unpriced: false,
               share: 0.5,
-              calls: 100,
-              rate_limited: 94,
-              server_err: 0,
-              other_err: 0,
-              error_rate: 0.94,
-              cost: 1.0,
             },
             {
               key: "model-very-long-name-identifier-95",
               metric_val: 0.95,
               insufficient: false,
-              unknown_cache: false,
-              has_unpriced: false,
               share: 0.5,
-              calls: 100,
-              rate_limited: 95,
-              server_err: 0,
-              other_err: 0,
-              error_rate: 0.95,
-              cost: 1.0,
             },
           ],
         },
@@ -1135,19 +1668,37 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     // Monotonicity assertion: 95% filled segment width must be strictly greater than 94%
     assert(trackGeometries[1].segWidth > trackGeometries[0].segWidth,
       `95% filled segment width (${trackGeometries[1].segWidth}px) must be greater than 94% (${trackGeometries[0].segWidth}px)`);
-    // 4. Verify tooltips on bar row and focus accessibility
+    // 4. Verify tooltips on bar row and focus accessibility (metrics resolved from summaries)
     const firstBar = page.locator(".an-bar-row").first();
     const tooltipTitle = await firstBar.getAttribute("title");
     const ariaLabel = await firstBar.getAttribute("aria-label");
-    assert(tooltipTitle && tooltipTitle.includes("Calls:"), `bar row must have detailed tooltip: ${tooltipTitle}`);
-    assert(ariaLabel && ariaLabel.includes("Calls:"), `bar row must have accessible aria-label: ${ariaLabel}`);
-
+    // Check statistical content & cancel conservation rather than pinned wording
+    assert(tooltipTitle, "bar row must have tooltip");
+    assert(ariaLabel, "bar row must have accessible aria-label");
+    const matchCalls = tooltipTitle.match(/: (\d+)/);
+    assert(matchCalls, `tooltip must contain call count: ${tooltipTitle}`);
+    const totalCalls = parseInt(matchCalls[1], 10);
+    assert.equal(totalCalls, 100, "resolved call count should match summary");
+    const matchDetail = tooltipTitle.match(/\(([^)]+)\)/);
+    assert(matchDetail, `tooltip must contain breakdown details: ${tooltipTitle}`);
+    const parts = matchDetail[1].split(",").map((s) => s.trim());
+    const nums = parts.map((p) => {
+      const m = p.match(/:\s*(\d+)/);
+      return m ? parseInt(m[1], 10) : NaN;
+    });
+    assert.equal(nums.length, 3, `breakdown must contain exactly 3 components (success, errors, canceled): ${matchDetail[1]}`);
+    const [success, errs, canceled] = nums;
+    assert(!isNaN(success) && !isNaN(errs) && !isNaN(canceled), "breakdown counts must be valid integers");
+    assert(canceled > 0, `canceled count must be > 0 to verify non-trivial conservation, got ${canceled}`);
+    assert.equal(success + errs + canceled, totalCalls, `conservation: success (${success}) + errors (${errs}) + canceled (${canceled}) must equal total calls (${totalCalls})`);
+    assert(tooltipTitle.includes("94.0%"), `bar row tooltip must contain error rate: ${tooltipTitle}`);
+    assert(ariaLabel.includes("94.0%"), `aria-label must contain error rate: ${ariaLabel}`);
     // 5. Test filter clear button: select provider then click clear x
     const providerWrap = page.locator('.an-filter-wrap[data-filter-dim="provider"]');
     const providerBtn = providerWrap.locator(".an-filter-btn");
     await providerBtn.click();
-    await page.locator("#pop:not([hidden])").waitFor();
-    await page.locator("#pop #list li").filter({ hasText: "openai" }).click();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
+    await page.locator(".proto-menu.an-filter-menu .pm-item").filter({ hasText: "openai" }).click();
     await page.waitForTimeout(100);
 
     // Verify clear button exists in DOM
@@ -1198,8 +1749,8 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await modelWrap.waitFor();
     const modelBtn = modelWrap.locator(".an-filter-btn");
     await modelBtn.click();
-    await page.locator("#pop:not([hidden])").waitFor();
-    await page.locator("#pop #list li").filter({ hasText: longModelName }).click();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
+    await page.locator(".proto-menu.an-filter-menu .pm-item").filter({ hasText: longModelName }).click();
     await page.waitForTimeout(100);
 
     const modelWrapWidth = await modelWrap.evaluate((el) => el.getBoundingClientRect().width);
@@ -1229,14 +1780,12 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
       document.querySelector("#view-analytics").append(testEl);
     });
 
-    // Toggle mask on in-place via Routing button by switching view within single SPA session
-    await page.evaluate(() => window.show("routing"));
-    await page.locator("#rtMask").waitFor();
-    await page.locator("#rtMask").click();
-
-    // Switch back to analytics in-place
-    await page.evaluate(() => window.show("analytics"));
-    await page.locator("#view-analytics:not([hidden])").waitFor();
+    // Toggle masking on in place from the drill page's shared button (no view switch).
+    await openDrill(page);
+    await page.locator("#anDrillMask").click();
+    await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
+    await page.locator("#anBack").click();
+    await page.locator("#anBody:not([hidden])").waitFor();
 
     // Wait for MutationObserver to apply mask to test element
     await page.waitForFunction(() => {
@@ -1259,10 +1808,93 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     assert(maskedAttrs && !maskedAttrs.ariaLabel.includes("test.org"), `aria-label must be masked: ${maskedAttrs?.ariaLabel}`);
     assert(maskedAttrs.title.includes("@") && maskedAttrs.ariaLabel.includes("@"), "masked email should preserve @ structure");
 
-    // Unmask in-place
-    await page.evaluate(() => window.show("routing"));
-    await page.locator("#rtMask").waitFor();
-    await page.locator("#rtMask").click();
-    await page.evaluate(() => window.show("analytics"));
+    // Unmask from the drill page's button.
+    await openDrill(page);
+    await page.locator("#anDrillMask").click();
+    await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "false");
+    await page.locator("#anBack").click();
+    await page.locator("#anBody:not([hidden])").waitFor();
+  });
+
+  test(engine + ": account masking is shared across windows on both settings, and a failed save stays masked", async (t) => {
+    assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
+    maskServer.accounts = false;
+    const browser = await launchBrowser(engine);
+    t.after(() => browser.close());
+
+    // Two contexts stand in for two windows (native and web): separate storage, so only the shared
+    // settings read keeps them in step, not same-origin storage events.
+    const open = async (serve) => {
+      const context = await browser.newContext({ viewport: { width: 1100, height: 750 } });
+      const page = await context.newPage();
+      page.setDefaultTimeout(6000);
+      await page.route("**/*", serve || createServer());
+      await page.goto("http://magpie.test/?view=analytics");
+      await page.locator("#view-analytics:not([hidden])").waitFor();
+      await page.evaluate(() => {
+        const d = document.createElement("div");
+        d.id = "maskProbe";
+        d.textContent = "pick.owner@corp.example";
+        document.querySelector("#view-analytics").append(d);
+      });
+      return { context, page };
+    };
+
+    const a = await open();
+    const b = await open();
+    assert.equal(await a.page.locator("#maskProbe .pii").count(), 0, "accounts start in sight");
+    assert.equal(await b.page.locator("#maskProbe .pii").count(), 0, "accounts start in sight in the other window");
+
+    // Turn masking on in the first window through the shared drill button.
+    await openDrill(a.page);
+    const onPosted = a.page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/api/settings/mask-accounts"));
+    await a.page.locator("#anDrillMask").click();
+    await a.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
+    await onPosted;
+    assert.equal(maskServer.accounts, true, "turning masking on persists to the shared settings API");
+    await a.page.waitForFunction(() => document.querySelector("#maskProbe .pii"));
+
+    // The other window follows the shared setting on.
+    await b.page.bringToFront();
+    await b.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true", null, { timeout: 8000 });
+    assert.equal(await b.page.locator("#maskProbe .pii").count(), 1, "the other window follows masking on");
+
+    // OFF propagates too: another origin turns masking off and the window follows it back.
+    maskServer.accounts = false;
+    await b.page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await b.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "false", null, { timeout: 9000 });
+    assert.equal(await b.page.locator("#maskProbe .pii").count(), 0, "the other window follows masking off");
+
+    // A failed save keeps masking on locally and reports it, and a later read must not revert it.
+    const c = await open(async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/settings/mask-accounts") return route.fulfill({ status: 503, body: "settings write failed" });
+      return createServer()(route);
+    });
+    await openDrill(c.page);
+    await c.page.locator("#anDrillMask").click();
+    await c.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
+    await c.page.waitForFunction(() => document.querySelector("#status")?.classList.contains("err"));
+    assert.match(await c.page.locator("#status").textContent(), /Failed to save account masking/, "a failed save is reported to the reader");
+    assert.equal(await c.page.locator("#anDrillMask").getAttribute("aria-pressed"), "true", "a failed save keeps masking on locally");
+    await c.page.waitForTimeout(6000); // let a polling read of the still-unmasked setting run
+    assert.equal(await c.page.locator("#anDrillMask").getAttribute("aria-pressed"), "true", "a late read must not revert a window after a failed save");
+
+    // Rapid on/off settles on the last choice, and the shared setting matches it.
+    const d = await open();
+    await openDrill(d.page);
+    await d.page.locator("#anDrillMask").click(); // on
+    await d.page.locator("#anDrillMask").click(); // off
+    await d.page.locator("#anDrillMask").click(); // on (the last choice)
+    await d.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
+    for (let i = 0; i < 40 && maskServer.accounts !== true; i++) await d.page.waitForTimeout(50);
+    assert.equal(maskServer.accounts, true, "rapid toggling settles on the last choice in the shared settings");
+    assert.equal(await d.page.locator("#anDrillMask").getAttribute("aria-pressed"), "true", "local state follows the last toggle");
+    await a.context.close();
+    await b.context.close();
+    await c.context.close();
+    await d.context.close();
+    maskServer.accounts = false;
   });
 }
+

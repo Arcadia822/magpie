@@ -707,24 +707,42 @@ button.an-kpi-tile.active {
   color: var(--muted);
 }
 
-.an-drill-return-btn {
+/* Inline Routing Container inside Right Drill Pane */
+.an-drill-routing {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  width: 100%;
+}
+.an-drill-routing-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+.an-drill-routing > .rt {
+  margin: 0;
+  padding: 12px 14px;
+}
+.an-drill-routing .rt-back-analytics,
+.an-drill-route-back {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background: var(--card);
-  color: var(--muted);
+  gap: 5px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
   cursor: pointer;
-  transition: background-color .15s, border-color .15s, color .15s;
-  flex: none;
-}
-.an-drill-return-btn:hover {
   background: var(--pill);
-  border-color: var(--line-2);
+  border: 1px solid var(--line);
+  align-self: flex-start;
+}
+.an-drill-routing .rt-back-analytics:hover,
+.an-drill-route-back:hover {
+  background: var(--pill-hover);
   color: var(--fg);
 }
 
@@ -753,9 +771,17 @@ button.an-kpi-tile.active {
   background: var(--card-2);
   border-color: var(--line);
 }
+.an-call-item.disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
 .an-call-item.active {
   border-color: var(--accent);
   background: var(--pill-hover);
+}
+.an-call-item.loading {
+  cursor: progress;
+  opacity: .7;
 }
 
 .an-call-item-top {
@@ -815,58 +841,6 @@ button.an-kpi-tile.active {
 .an-st-badge.st-499 { background: var(--pill); color: var(--muted); }
 .an-st-badge.st-err { background: var(--pill); color: var(--fg-2); }
 
-/* Detail Card in Right Pane */
-.an-call-detail-box {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 12px 14px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
-  font-size: 11.5px;
-  line-height: 1.45;
-}
-.an-detail-group b {
-  display: block;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: .03em;
-  color: var(--muted);
-  margin-bottom: 4px;
-}
-.an-detail-row {
-  display: grid;
-  grid-template-columns: 120px minmax(0, 1fr);
-  align-items: baseline;
-  gap: 8px;
-  color: var(--fg-2);
-  min-width: 0;
-}
-.an-detail-row > span:first-child {
-  flex: none;
-  color: var(--muted);
-}
-.an-detail-row > span:last-child {
-  color: var(--fg);
-  font-weight: 500;
-  text-align: left;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.an-sess-copy-btn {
-  margin-left: 4px;
-  padding: 1px 4px;
-  font-size: 10.5px;
-  border-radius: 4px;
-  border: 1px solid var(--line);
-  background: var(--pill);
-  cursor: pointer;
-}
-.an-sess-copy-btn:hover {
-  background: var(--pill-hover);
-}
-
 /* Error & Loading States */
 .an-drill-state-box {
   padding: 30px 16px;
@@ -877,6 +851,20 @@ button.an-kpi-tile.active {
   gap: 10px;
   color: var(--muted);
   font-size: 12px;
+}
+.an-drill-state-box .an-spinner {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--fg);
+  animation: spin .8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .an-drill-state-box .an-spinner {
+    animation: none;
+  }
 }
 .an-drill-state-box.an-err {
   color: var(--red);
