@@ -393,6 +393,9 @@ async function inlineReleased(page) {
 // Drill into the calls list from whatever the current dimension shows: a KPI tile in All mode,
 // or the first ranking bar in a By Model/By Provider view.
 async function openDrill(page) {
+  await page.locator('#view-analytics').hover();
+  await page.mouse.wheel(0, -10000);
+  await page.waitForFunction(() => document.querySelector('#view-analytics').scrollTop === 0);
   let entry = page.locator('#anBody button[data-chart-id]').first();
   if (!(await entry.isVisible().catch(() => false))) {
     await page.locator('#anDim button.opt').first().click();
