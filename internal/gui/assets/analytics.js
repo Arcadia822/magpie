@@ -21,7 +21,7 @@
   let currentDim = "all";    // "all" | "model" | "provider" | "agent"
   let filters = { model: "", provider: "", agent: "" };
   let data = null;           // full AnalyticsData from GET /api/analytics
-  let shown = null;          // the period and filters data answers
+  let shown = null;          // the period, dimension and filters data answers
   let loadSeq = 0;           // ignore stale async responses
   let pendingFetch = false;  // true while GET /api/analytics is in flight
   let dashboardScrollTop = 0;// saved scrollTop when entering drill page
@@ -176,7 +176,7 @@
       const res = await api("analytics?" + params.toString());
       if (seq !== loadSeq) return; // Stale request, ignore
       data = res;
-      shown = { period: currentPeriod, filters: { ...filters } };
+      shown = { period: currentPeriod, dim: currentDim, filters: { ...filters } };
       pendingFetch = false;
       render();
     } catch (e) {
@@ -186,8 +186,9 @@
       // the controls, and a drill from its charts, are of what is shown
       if (shown) {
         currentPeriod = shown.period;
+        currentDim = shown.dim;
         filters = { ...shown.filters };
-        renderControls();
+        render();
       }
       status(e.message || String(e), "err");
     } finally {
@@ -412,6 +413,7 @@
         if (needRefetch) {
           fetchAnalytics();
         } else {
+          if (shown && (currentDim === "all" || !shown.filters[currentDim])) shown.dim = currentDim;
           render();
         }
       };

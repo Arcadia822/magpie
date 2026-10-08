@@ -1204,30 +1204,6 @@ func Handler(w Windows, gw *gateway.Server) http.Handler {
 		}
 		writeJSON(rw, settingsState())
 	})
-	// whether accounts and emails are masked across the pages: Routing's,
-	// Usage's and Analytics' toggle, set on its own
-	// just the one bit, so a window can follow the toggle without the whole
-	// settings page's answer every few seconds
-	mux.HandleFunc("GET /api/settings/mask-accounts", func(rw http.ResponseWriter, r *http.Request) {
-		writeJSON(rw, struct {
-			On bool `json:"on"`
-		}{On: settings.Load().MaskAccounts})
-	})
-	// and turned: the one bit written, the whole settings page's answer back
-	mux.HandleFunc("POST /api/settings/mask-accounts", func(rw http.ResponseWriter, r *http.Request) {
-		var in struct{ On bool }
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			fail(rw, err)
-			return
-		}
-		s := settings.Load()
-		s.MaskAccounts = in.On
-		if err := settings.Save(s); err != nil {
-			fail(rw, err)
-			return
-		}
-		writeJSON(rw, settingsState())
-	})
 	// whether agents' sign-ins are read and served as subscriptions
 	// (#1535): saved, the accounts read before are forgotten at once
 	mux.HandleFunc("POST /api/settings/account-discovery", func(rw http.ResponseWriter, r *http.Request) {

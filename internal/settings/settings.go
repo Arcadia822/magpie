@@ -292,9 +292,6 @@ type Settings struct {
 	// This computer's own (KeepOwn): magpie at login comes up before the
 	// proxy app, and its reads went out direct.
 	QuotaReads string `json:"quotaReads,omitempty"`
-	// MaskAccounts hides accounts and email addresses across the UI (Routing,
-	// Usage, Analytics drill) for screenshots.
-	MaskAccounts bool `json:"maskAccounts"`
 	// UsageAlert is how much of a subscription's or plan's window, in
 	// percent, is used when magpie says so with a notification (#368):
 	// once for each time the window runs, for every window routing counts

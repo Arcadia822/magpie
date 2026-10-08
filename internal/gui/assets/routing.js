@@ -61,6 +61,7 @@
       s.classList.add("rt-errs");
       s.title = t("Show the latest request that failed");
       s.addEventListener("click", () => {
+        if (inlineMounted) return;
         const r = listed().find(failedRoute);
         if (r) pick(r);
       });
