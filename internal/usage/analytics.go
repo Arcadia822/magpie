@@ -366,14 +366,14 @@ type CallWithCost struct {
 }
 
 func callSpeed(r Record) (float64, bool) {
-    if r.Failed() {
-        return 0, false
-    }
-    out, w := r.Decode()
-    if w <= 0 {
-        return 0, false
-    }
-    return float64(out) / (float64(w) / 1000.0), true
+	if r.Failed() {
+		return 0, false
+	}
+	out, w := r.Decode()
+	if w <= 0 {
+		return 0, false
+	}
+	return float64(out) / (float64(w) / 1000.0), true
 }
 
 func callCost(r Record, priceOf PriceLookup) (float64, bool) {
@@ -439,7 +439,7 @@ func matchCallsCandidate(r Record, order int64, chartID string, priceOf PriceLoo
 			matched = true
 		}
 	case "speed":
-        if spd, ok := callSpeed(r); ok {
+		if spd, ok := callSpeed(r); ok {
 			cand.speed = spd
 			matched = true
 		}
@@ -514,7 +514,7 @@ func (ea *entityAccumulator) add(r Record, pr *catalog.Price) {
 		if ea.sketch != nil {
 			_ = ea.sketch.Add(float64(r.TTFT))
 		}
-        if _, w := r.Decode(); w > 0 {
+		if _, w := r.Decode(); w > 0 {
 			ea.decodeCalls++
 		}
 	}
@@ -1137,7 +1137,7 @@ func formatCallsResponse(candidates []callsCandidate, limit int) []CallWithCost 
 			costPtr = &c
 		}
 		var speedPtr *float64
-        if spd, ok := callSpeed(r); ok {
+		if spd, ok := callSpeed(r); ok {
 			speedPtr = &spd
 		}
 		res[i] = CallWithCost{

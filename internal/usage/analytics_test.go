@@ -610,6 +610,27 @@ func TestAnalyzeStreamFailureAndRejectionInvariants(t *testing.T) {
 	}
 }
 
+func TestAnalyticsReasoningSpeedUsesAnswerWindow(t *testing.T) {
+	now := time.Date(2026, 9, 23, 15, 30, 0, 0, time.UTC)
+	recs := []Record{
+		{Time: now.Add(-3 * time.Minute), Provider: "p", Model: "answer", Status: 200, Output: 2200, Reasoning: 2000, TTFT: 100, FirstText: 1000, Millis: 3000},
+		{Time: now.Add(-2 * time.Minute), Provider: "p", Model: "plain", Status: 200, Output: 50, TTFT: 100, Millis: 1100},
+		{Time: now.Add(-time.Minute), Provider: "p", Model: "tools", Status: 200, Output: 2000, Reasoning: 2000, TTFT: 100, Millis: 1100},
+	}
+	lookup := mockPriceLookup(nil)
+	data := analyzeWith(Today, AnalyticsFilter{}, now, recs, lookup)
+	if data.Summary.DecodeCalls != 2 || data.Summary.Speed == nil || math.Abs(*data.Summary.Speed-250.0/3) > 1e-6 {
+		t.Fatalf("summary speed/count = %v/%d, want 250/3 and 2", data.Summary.Speed, data.Summary.DecodeCalls)
+	}
+	calls, err := recentCallsWith(Today, AnalyticsFilter{}, "speed", 50, now, recs, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 2 || calls[0].Model != "plain" || calls[1].Model != "answer" || calls[1].Speed == nil || *calls[1].Speed != 100 {
+		t.Fatalf("speed calls = %+v, want plain 50 then answer 100, no tool-only reply", calls)
+	}
+}
+
 func TestDefaultPriceLookupAndAnalyticsSettingsPricing(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

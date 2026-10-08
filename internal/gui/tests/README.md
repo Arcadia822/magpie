@@ -166,10 +166,12 @@ It exercises the drilldown page view (compact chart with entity ranking and high
 routing diagrams and request stories embedded in the right pane, with return restoration
 of period, dimension, filters, entity and scroll position. Account masking is shared by
 Routing, Usage and Analytics through the existing `magpie.maskEmails` local preference,
-including reloads and storage events between windows on the same origin.
+including reloads and storage events between windows on the same origin. It retains
+upstream Privacy inheritance when no local account-mask choice has been made.
 The regressions also cover
 layout stability across window sizes down to 659px without horizontal overflow, monotonic bar-track fills,
-chart tooltips, speed formatting (reusing upstream `Totals.Speed()` and `speedOf`), HTTP-200 stream error handling,
+chart tooltips, speed formatting (reusing upstream `Totals.Speed()` and `Record.Decode()`
+for reasoning replies' answer windows), HTTP-200 stream error handling,
 499 cancellation percentage explanations, accessible status and busy states, email masking, and language switching.
 Run with `node --test internal/gui/tests/analytics.test.cjs` in Chromium and WebKit.
 `menu-scroll.test.cjs` loads the real HTML, CSS and JavaScript with isolated API
