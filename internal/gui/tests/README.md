@@ -159,11 +159,14 @@ The API is faked and no terminal app is launched.
 
 `analytics.test.cjs` covers the Quality & Analytics view (`?view=analytics`) with real assets and
 isolated mock APIs: navigation from Usage and URL params, display dimensions (all, model, provider, agent),
-mutually exclusive filters using `openProtoMenu`, header controls alignment, and stale response cancellation.
+mutually exclusive filters using `openProtoMenu`, header controls alignment, stale response cancellation,
+and failed dimension changes restoring a visible, clearable filter. Inline route selection
+stays tied to the Analytics call when the global error counter is clicked.
 It exercises the drilldown page view (compact chart with entity ranking and highlight, 50-call list),
 routing diagrams and request stories embedded in the right pane, with return restoration
 of period, dimension, filters, entity and scroll position. Account masking is shared by
-Routing, Usage and Analytics, persists in settings, and follows across native and web windows.
+Routing, Usage and Analytics through the existing `magpie.maskEmails` local preference,
+including reloads and storage events between windows on the same origin.
 The regressions also cover
 layout stability across window sizes down to 659px without horizontal overflow, monotonic bar-track fills,
 chart tooltips, speed formatting (reusing upstream `Totals.Speed()` and `speedOf`), HTTP-200 stream error handling,

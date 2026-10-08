@@ -278,8 +278,6 @@ const emptyAnalyticsData = {
   filters: { model: [], provider: [], agent: [] },
 };
 
-// The account-mask setting every fake window shares, as the real settings API does.
-const maskServer = { accounts: false };
 const state = {
   agents: [{ id: "codex", name: "Codex", path: "/test/config.toml", fields: [] }],
   profiles: [],
@@ -302,20 +300,10 @@ function createServer(customData = mockAnalyticsData, delay = 0) {
     const url = new URL(route.request().url());
     const json = (data) => route.fulfill({ json: data });
 
-    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs = {lang:"en",theme:"light",web:true,maskAccounts:' + maskServer.accounts + ",maskAccountsSet:true};" });
+    if (url.pathname === "/boot.js") return route.fulfill({ contentType: "text/javascript", body: 'window.bootPrefs = {lang:"en",theme:"light",web:true};' });
     if (url.pathname === "/wails/runtime.js") return route.fulfill({ contentType: "text/javascript", body: "export const Window = {};" });
-    if (url.pathname === "/api/state") return json({ ...state, settings: { ...state.settings, maskAccounts: maskServer.accounts } });
-    if (url.pathname === "/api/settings/mask-accounts") {
-      if (route.request().method() === "GET") return json({ on: maskServer.accounts });
-      const body = JSON.parse(route.request().postData() || "{}");
-      if (typeof body.on === "boolean") maskServer.accounts = body.on;
-      return json({ ...state.settings, maskAccounts: maskServer.accounts });
-    }
-    if (url.pathname === "/api/settings") {
-      const body = JSON.parse(route.request().postData() || "{}");
-      if (typeof body.maskAccounts === "boolean") maskServer.accounts = body.maskAccounts;
-      return json({ ...state.settings, maskAccounts: maskServer.accounts });
-    }
+    if (url.pathname === "/api/state") return json(state);
+    if (url.pathname === "/api/settings") return json(state.settings);
     if (url.pathname === "/api/gateway/trace") {
       return json({ mine: false, seq: 0, routes: [], totals: { requests: 0, rerouted: 0, errors: 0 }, now: new Date().toISOString() });
     }
@@ -628,11 +616,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     const headBox = await page.locator(".an-drill-page-head").boundingBox();
     const maskBox = await maskBtn.boundingBox();
     assert(Math.abs(headBox.x + headBox.width - (maskBox.x + maskBox.width)) < 2, "drill mask button must sit at the header row's right end");
-    const maskOnPosted = page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/api/settings/mask-accounts"));
     await maskBtn.click();
     await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
-    await maskOnPosted;
-    assert.equal(maskServer.accounts, true, "masking persists to the shared settings API");
+    assert.equal(await page.evaluate(() => localStorage.getItem("magpie.maskEmails")), "1", "Analytics uses Usage's existing masking preference");
 
     // Open the inline route again with masking on: its accounts are masked, and the state survives return.
     await firstCallItem.click();
@@ -656,11 +642,9 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.locator(".an-calls-list").waitFor();
     assert.equal(await callItems.nth(4).getAttribute("title"), "该记录没有关联的路由信息", "disabled call tooltip follows the locale");
     await page.evaluate(() => window.setLocale("en"));
-    const maskOffPosted = page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/api/settings/mask-accounts"));
     await maskBtn.click();
     await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "false");
-    await maskOffPosted;
-    assert.equal(maskServer.accounts, false, "unmasking persists to the shared settings API");
+    assert.equal(await page.evaluate(() => localStorage.getItem("magpie.maskEmails")), "0", "unmasking updates the existing shared preference");
 
     // 5e. Leaving Analytics for another page releases the inline route, and the Usage page still
     // opens the full Routing page through openRoute (no inline mount there, no return button).
@@ -714,6 +698,92 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.locator("#view-usage:not([hidden])").waitFor();
     assert(await page.locator("#view-usage").isVisible(), "must navigate back to usage view");
     assert.equal(errors.length, 0, `no page errors occurred: ${errors.join(", ")}`);
+  });
+
+  test(engine + ": inline error counter mismatch does not steal story from analytics inline route", async (t) => {
+    const browser = await launchBrowser(engine);
+    t.after(() => browser.close());
+    const page = await browser.newPage();
+    page.setDefaultTimeout(6000);
+
+    await page.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === "/api/gateway/trace") {
+        if (url.searchParams.has("wait")) await new Promise((resolve) => setTimeout(resolve, 100));
+        return route.fulfill({
+          json: {
+            mine: true,
+            seq: 1,
+            totals: { requests: 1, rerouted: 0, errors: 1 },
+            routes: [
+              {
+                id: 456,
+                time: new Date().toISOString(),
+                agent: "codex",
+                model: "gpt-failed-b",
+                provider: "openai",
+                order: [{ id: "openai", provider: "openai", name: "OpenAI", model: "gpt-failed-b", kind: "provider", routing: "order" }],
+                tries: [{ id: "openai", model: "gpt-failed-b", start: new Date().toISOString(), done: true, status: 500, ms: 100 }],
+                done: true,
+                status: 500,
+                ms: 100,
+              },
+            ],
+            now: new Date().toISOString(),
+          },
+        });
+      }
+      if (url.pathname === "/api/gateway/route") {
+        const id = url.searchParams.get("id");
+        if (id === "456") {
+          return route.fulfill({
+            json: {
+              id: 456,
+              time: new Date().toISOString(),
+              agent: "codex",
+              model: "gpt-failed-b",
+              provider: "openai",
+              order: [{ id: "openai", provider: "openai", name: "OpenAI", model: "gpt-failed-b", kind: "provider", routing: "order" }],
+              tries: [{ id: "openai", model: "gpt-failed-b", start: new Date().toISOString(), done: true, status: 500, ms: 100 }],
+              done: true,
+              status: 500,
+              ms: 100,
+            },
+          });
+        }
+      }
+      return createServer()(route);
+    });
+
+    await page.goto("http://magpie.test/?view=analytics");
+    await openDrill(page);
+    const callA = page.locator(".an-call-item").first();
+    await callA.click();
+
+    // Story A (id 123, gpt-5.5) mounts inline inside right pane
+    const inlineRouting = page.locator("#anDrillRouting");
+    await inlineRouting.waitFor();
+    await page.locator("#anDrillRight .rt-steps").waitFor();
+    assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /gpt-5\.5/, "inline routing story must show route A");
+
+    // Clicking the errors counter while inlineMounted must be ignored: story A preserved
+    const errCounter = page.locator("#anDrillRouting .rt-errs");
+    await errCounter.click();
+    assert.match(await page.locator("#anDrillRight .rt-steps").textContent(), /gpt-5\.5/, "story remains A after clicking error counter inline");
+
+    // Return to calls list preserves selected A
+    await page.locator("#anDrillRouting #rtBackAnalytics").click();
+    await page.locator(".an-calls-list").waitFor();
+    assert.equal(await page.locator(".an-call-item.active").count(), 1, "call A remains selected");
+
+    // Standalone routing still allows clicking errors counter to open failed B
+    await page.evaluate(() => window.show("routing"));
+    await page.locator("#view-routing:not([hidden])").waitFor();
+    const standaloneErrCounter = page.locator("#view-routing .rt-errs");
+    await standaloneErrCounter.waitFor();
+    await standaloneErrCounter.click();
+    await page.locator("#view-routing .rt-steps").waitFor();
+    assert.match(await page.locator("#view-routing .rt-steps").textContent(), /gpt-failed-b/, "standalone routing errors counter opens failed B");
   });
 
   test(engine + ": 659px desktop width prioritizes two columns without horizontal overflow", async (t) => {
@@ -1306,7 +1376,7 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
         lastDrillCallsUrl = url.toString();
         return route.fulfill({ json: mockCallsData });
       }
-      return createServer()(route);
+      return route.fallback();
     });
 
     // the dimension here is By Model: drill from a ranking row
@@ -1317,6 +1387,69 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
 
     await page.locator("#anBack").click();
     await page.locator("#anBody:not([hidden])").waitFor();
+
+    // 6. Dimension change with filter clear triggers fetch; failure rolls back dimension & filters
+    // Start in All dimension with provider=openai set
+    rejectAnalytics = false;
+    await page.locator("#anDim button").filter({ hasText: "All" }).click();
+    // Set provider filter to openai
+    const provFilterWrap = page.locator('.an-filter-wrap[data-filter-dim="provider"]');
+    await provFilterWrap.locator(".an-filter-btn").click();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
+    const provOption = page.locator(".proto-menu.an-filter-menu .pm-item").filter({ hasText: "openai" });
+    const provLoaded = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/analytics" && r.ok());
+    await provOption.click();
+    await provLoaded;
+    await page.waitForFunction(() => !document.querySelector("#view-analytics").classList.contains("loading"));
+    assert.equal((await page.locator("#anDim button.opt.on").textContent()).trim(), "All");
+    assert(await provFilterWrap.locator(".an-filter-clear").isVisible(), "provider clear button should be visible");
+
+    // Now switch to By Provider while rejecting requests: clearing provider requires fetch, which fails
+    rejectAnalytics = true;
+    await page.locator("#anDim button").filter({ hasText: "By Provider" }).click();
+    await page.waitForFunction(() => !document.querySelector("#view-analytics").classList.contains("loading"));
+
+    // Dimension must roll back to All, provider filter restored and visible, and clearing works
+    assert.equal((await page.locator("#anDim button.opt.on").textContent()).trim(), "All", "dimension must revert to All on failure");
+    const rolledBackProvWrap = page.locator('.an-filter-wrap[data-filter-dim="provider"]');
+    assert(await rolledBackProvWrap.isVisible(), "provider filter control must remain visible after rollback");
+    const rolledBackClear = rolledBackProvWrap.locator(".an-filter-clear");
+    assert(await rolledBackClear.isVisible(), "provider filter clear button must remain visible after rollback");
+
+    // Clearing filter works when requests succeed
+    rejectAnalytics = false;
+    await rolledBackProvWrap.hover();
+    await page.waitForFunction(() => getComputedStyle(document.querySelector('.an-filter-wrap[data-filter-dim="provider"] .an-filter-clear')).opacity === "1");
+    const clearLoaded = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/analytics" && r.ok());
+    await rolledBackClear.click();
+    await clearLoaded;
+    await page.waitForFunction(() => !document.querySelector("#view-analytics").classList.contains("loading"));
+    assert.equal(await rolledBackProvWrap.locator(".an-filter-clear").count(), 0, "provider filter should be cleared");
+
+    // 7. Dimension switch without fetch then failed switch: avoids stale shown.dim
+    // Set provider in All first with successful fetch
+    const provFilterWrapAll = page.locator('.an-filter-wrap[data-filter-dim="provider"]');
+    await provFilterWrapAll.locator(".an-filter-btn").click();
+    await page.locator(".proto-menu.an-filter-menu:not([hidden])").waitFor();
+    const provOptAll = page.locator(".proto-menu.an-filter-menu .pm-item").filter({ hasText: "openai" });
+    const provLoadedAll = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/analytics" && r.ok());
+    await provOptAll.click();
+    await provLoadedAll;
+    await page.waitForFunction(() => !document.querySelector("#view-analytics").classList.contains("loading"));
+    assert.equal((await page.locator("#anDim button.opt.on").textContent()).trim(), "All");
+
+    // Switch to By Model without fetch (no model filter active)
+    await page.locator("#anDim button").filter({ hasText: "By Model" }).click();
+    assert.equal((await page.locator("#anDim button.opt.on").textContent()).trim(), "By Model");
+
+    // Now try switching to By Provider with failure (clears provider filter -> fetch fails)
+    rejectAnalytics = true;
+    await page.locator("#anDim button").filter({ hasText: "By Provider" }).click();
+    await page.waitForFunction(() => !document.querySelector("#view-analytics").classList.contains("loading"));
+
+    // Dimension must roll back to By Model (proving the no-fetch switch updated shown.dim from All to By Model)
+    assert.equal((await page.locator("#anDim button.opt.on").textContent()).trim(), "By Model", "dimension must revert to By Model, not stale All");
+    rejectAnalytics = false;
   });
 
   test(engine + ": All mode KPI drilldown opens independent page, closes cleanly, and survives clicks", async (t) => {
@@ -1816,85 +1949,45 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.locator("#anBody:not([hidden])").waitFor();
   });
 
-  test(engine + ": account masking is shared across windows on both settings, and a failed save stays masked", async (t) => {
-    assert(["chromium", "webkit"].includes(engine), "BROWSER must be chromium or webkit");
-    maskServer.accounts = false;
+  test(engine + ": Analytics and Usage share the existing account mask preference", async (t) => {
     const browser = await launchBrowser(engine);
     t.after(() => browser.close());
-
-    // Two contexts stand in for two windows (native and web): separate storage, so only the shared
-    // settings read keeps them in step, not same-origin storage events.
-    const open = async (serve) => {
-      const context = await browser.newContext({ viewport: { width: 1100, height: 750 } });
-      const page = await context.newPage();
-      page.setDefaultTimeout(6000);
-      await page.route("**/*", serve || createServer());
-      await page.goto("http://magpie.test/?view=analytics");
-      await page.locator("#view-analytics:not([hidden])").waitFor();
-      await page.evaluate(() => {
-        const d = document.createElement("div");
-        d.id = "maskProbe";
-        d.textContent = "pick.owner@corp.example";
-        document.querySelector("#view-analytics").append(d);
-      });
-      return { context, page };
-    };
-
-    const a = await open();
-    const b = await open();
-    assert.equal(await a.page.locator("#maskProbe .pii").count(), 0, "accounts start in sight");
-    assert.equal(await b.page.locator("#maskProbe .pii").count(), 0, "accounts start in sight in the other window");
-
-    // Turn masking on in the first window through the shared drill button.
-    await openDrill(a.page);
-    const onPosted = a.page.waitForResponse((r) => r.request().method() === "POST" && r.url().includes("/api/settings/mask-accounts"));
-    await a.page.locator("#anDrillMask").click();
-    await a.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
-    await onPosted;
-    assert.equal(maskServer.accounts, true, "turning masking on persists to the shared settings API");
-    await a.page.waitForFunction(() => document.querySelector("#maskProbe .pii"));
-
-    // The other window follows the shared setting on.
-    await b.page.bringToFront();
-    await b.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true", null, { timeout: 8000 });
-    assert.equal(await b.page.locator("#maskProbe .pii").count(), 1, "the other window follows masking on");
-
-    // OFF propagates too: another origin turns masking off and the window follows it back.
-    maskServer.accounts = false;
-    await b.page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await b.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "false", null, { timeout: 9000 });
-    assert.equal(await b.page.locator("#maskProbe .pii").count(), 0, "the other window follows masking off");
-
-    // A failed save keeps masking on locally and reports it, and a later read must not revert it.
-    const c = await open(async (route) => {
-      const url = new URL(route.request().url());
-      if (url.pathname === "/api/settings/mask-accounts") return route.fulfill({ status: 503, body: "settings write failed" });
+    const context = await browser.newContext({ viewport: { width: 1100, height: 750 } });
+    await context.route("**/*", (route) => {
+      if (new URL(route.request().url()).pathname === "/api/usage/quotas") {
+        return route.fulfill({ json: [{ provider: "openai", name: "OpenAI", user: "pick.owner@corp.example", windows: [] }] });
+      }
       return createServer()(route);
     });
-    await openDrill(c.page);
-    await c.page.locator("#anDrillMask").click();
-    await c.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
-    await c.page.waitForFunction(() => document.querySelector("#status")?.classList.contains("err"));
-    assert.match(await c.page.locator("#status").textContent(), /Failed to save account masking/, "a failed save is reported to the reader");
-    assert.equal(await c.page.locator("#anDrillMask").getAttribute("aria-pressed"), "true", "a failed save keeps masking on locally");
-    await c.page.waitForTimeout(6000); // let a polling read of the still-unmasked setting run
-    assert.equal(await c.page.locator("#anDrillMask").getAttribute("aria-pressed"), "true", "a late read must not revert a window after a failed save");
+    const page = await context.newPage();
+    page.setDefaultTimeout(6000);
+    await page.goto("http://magpie.test/?view=analytics");
+    await openDrill(page);
+    await page.locator("#anDrillMask").click();
+    assert.equal(await page.locator("#usageMask").getAttribute("aria-pressed"), "true", "Analytics immediately updates Usage's toggle");
+    assert.equal(await page.evaluate(() => localStorage.getItem("magpie.maskEmails")), "1");
 
-    // Rapid on/off settles on the last choice, and the shared setting matches it.
-    const d = await open();
-    await openDrill(d.page);
-    await d.page.locator("#anDrillMask").click(); // on
-    await d.page.locator("#anDrillMask").click(); // off
-    await d.page.locator("#anDrillMask").click(); // on (the last choice)
-    await d.page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "true");
-    for (let i = 0; i < 40 && maskServer.accounts !== true; i++) await d.page.waitForTimeout(50);
-    assert.equal(maskServer.accounts, true, "rapid toggling settles on the last choice in the shared settings");
-    assert.equal(await d.page.locator("#anDrillMask").getAttribute("aria-pressed"), "true", "local state follows the last toggle");
-    await a.context.close();
-    await b.context.close();
-    await c.context.close();
-    await d.context.close();
-    maskServer.accounts = false;
+    // The existing choice is restored on reload and inherited by new same-origin windows.
+    await page.reload();
+    await openDrill(page);
+    assert.equal(await page.locator("#anDrillMask").getAttribute("aria-pressed"), "true");
+    await page.locator(".an-call-item").first().click();
+    await page.locator("#anDrillRight .pii").first().waitFor();
+    const other = await context.newPage();
+    await other.goto("http://magpie.test/?view=usage");
+    await other.locator("#usageMask").waitFor();
+    assert.equal(await other.locator("#usageMask").getAttribute("aria-pressed"), "true");
+
+    // Usage turns it off; the already mounted Analytics route follows the storage event.
+    await other.locator("#usageMask").click();
+    await page.waitForFunction(() => document.querySelector("#anDrillMask").getAttribute("aria-pressed") === "false");
+    assert.equal(await page.locator("#anDrillRight .pii").count(), 0, "Usage reveals the existing Analytics story too");
+    await page.locator("#rtBackAnalytics").click();
+    await page.locator(".an-calls-list").waitFor();
+    await page.evaluate(() => window.show("usage"));
+    await page.locator("#usageMask").click();
+    assert.equal(await page.locator("#anDrillMask").getAttribute("aria-pressed"), "true", "Usage immediately updates Analytics's toggle");
+    await context.close();
   });
 }
 

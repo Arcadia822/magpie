@@ -3916,7 +3916,6 @@ const I18N = {
     "≈{cost} ({n} unpriced)": "≈{cost}（含 {n} 次未计价）",
     "Back to Quality & Analytics": "返回质量与分析",
     "Failed to load calls": "加载调用列表失败",
-    "Failed to save account masking: {error}": "保存账号打码设置失败：{error}",
     "Loading calls…": "加载调用记录…",
     "No matching calls found": "未找到匹配调用",
     "{in} in · {out} out": "{in} 输入 · {out} 输出",

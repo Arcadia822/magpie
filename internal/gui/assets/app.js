@@ -18066,9 +18066,6 @@ function applyPrefs(s, rate) {
     quotaLeft = !!s.quotaLeft;
     if (applyPrefs.painted) renderQuotas();
   }
-  if (typeof s.maskAccounts === "boolean" && typeof window.applyAccountMaskPrefs === "function") {
-    window.applyAccountMaskPrefs(s.maskAccounts);
-  }
   // the rate comes in /api/settings' answer (s.fx) or, from /api/state,
   // beside the settings rather than in them (rate): a cost drawn at start,
   // before Settings is ever opened, needs it from there (#212: cny still
