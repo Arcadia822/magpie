@@ -44,6 +44,8 @@ Selecting a ranked call reads its existing `route_id` and day, then mounts Routi
 stage and story in the Analytics right pane; the left ranking stays visible.
 Returning restores the selected call, filters and reader scroll. Leaving Analytics
 releases the inline mount so the standalone Routing page keeps its own behavior.
+Cross-page links to a historical request normalize every route in its day's list
+through `whole`, including refused requests whose order or tries serialize as null.
 Calls without a route ID disable that entry; a failed history read offers retry
 and return to the list. Account masking uses the existing Usage/Routing preference
 and Privacy state. See `analytics.test.cjs`, `TestAnalyticsRoutes` and

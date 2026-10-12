@@ -1843,7 +1843,7 @@
     if (targetDay) {
       const historyData = await loadDays(targetDay, isCurrent, false);
       if (!isCurrent()) return;
-      loadedRoutes = historyData?.routes || [];
+      loadedRoutes = (historyData?.routes || []).map(whole);
       loadedCut = !!historyData?.cut;
     }
     if (!isCurrent()) return;

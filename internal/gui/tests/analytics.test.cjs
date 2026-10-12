@@ -667,12 +667,18 @@ for (const engine of (process.env.BROWSER ? [process.env.BROWSER] : ["chromium",
     await page.evaluate(() => window.show("usage"));
     await page.locator("#view-usage:not([hidden])").waitFor();
 
+    await page.route("**/api/gateway/history?*", async (route) => route.fulfill({ json: {
+      days: [{ day: "2026-09-30", requests: 1 }],
+      routes: [{ id: 124, time: "2026-09-30T10:13:22.318Z", agent: "codex", model: "gpt-5.5", done: true, status: 400, order: null, tries: null }],
+      cut: false,
+    } }));
     await page.evaluate(() => window.openRoute(123, "2026-09-30T10:14:22.318Z"));
     await page.locator("#view-routing:not([hidden])").waitFor();
     assert(await page.locator("#view-analytics").isHidden(), "Usage openRoute still switches to the Routing page");
     await page.locator("#view-routing .rt-steps").waitFor();
     assert.match(await page.locator("#view-routing .rt-steps").textContent(), /gpt-5\.5/, "Usage openRoute still shows the route story");
     assert.equal(await page.locator(".rt-back-analytics, #rtBackAnalytics").count(), 0, "Usage openRoute must not show the analytics return button");
+    assert.equal(await page.locator("#view-routing .rt-req").count(), 2, "opening a linked call retains other historical requests with nullable route slices");
     await page.evaluate(() => window.show("usage"));
     await page.locator("#view-usage:not([hidden])").waitFor();
 
