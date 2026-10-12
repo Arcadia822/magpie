@@ -31,6 +31,24 @@ three.
 
 ## Constraints and failure behavior
 
+### Usage analytics
+
+Usage's Analytics entry opens `#view-analytics` in [`analytics.js`](../../internal/gui/assets/analytics.js).
+The read-only `GET /api/analytics` and `GET /api/analytics/calls` routes in
+[`analytics.go`](../../internal/gui/analytics.go) aggregate the existing usage ledger by
+model, provider and agent, using its shared index, date buckets and pricing cache
+dependencies. Failed attempts handed on to a later retry remain in token and cost
+totals but are excluded from request failures and the error trend.
+
+Selecting a ranked call reads its existing `route_id` and day, then mounts Routing's
+stage and story in the Analytics right pane; the left ranking stays visible.
+Returning restores the selected call, filters and reader scroll. Leaving Analytics
+releases the inline mount so the standalone Routing page keeps its own behavior.
+Calls without a route ID disable that entry; a failed history read offers retry
+and return to the list. Account masking uses the existing Usage/Routing preference
+and Privacy state. See `analytics.test.cjs`, `TestAnalyticsRoutes` and
+`TestAnalyticsHandedOnAttemptPreservesBillingWithoutFailure`.
+
 ### Routing purpose filter
 
 The request heading's purpose menu in [`routing.js`](../../internal/gui/assets/routing.js)

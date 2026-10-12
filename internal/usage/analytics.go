@@ -207,7 +207,7 @@ func (s *analyticsState) add(r Record, priceOf PriceLookup, renamed map[string]s
 	s.summaryAcc.add(r, pr)
 
 	bi := bucketIndex(s.bucket, s.since, t)
-	if bi >= 0 && bi < len(s.errorTrend) {
+	if !r.HandedOn && bi >= 0 && bi < len(s.errorTrend) {
 		switch classifyStatus(r) {
 		case statusRateLimited:
 			s.errorTrend[bi].RateLimited++
@@ -431,7 +431,7 @@ func matchCallsCandidate(r Record, order int64, chartID string, priceOf PriceLoo
 
 	switch chartID {
 	case "error_rate":
-		if r.Failed() && r.Status != 499 {
+		if r.LostRequest() && r.Status != 499 {
 			matched = true
 		}
 	case "ttft":
@@ -494,6 +494,9 @@ func (ea *entityAccumulator) add(r Record, pr *catalog.Price) {
 
 	if r.Input+r.Output > 0 && pr == nil {
 		ea.hasUnpriced = true
+	}
+	if r.HandedOn {
+		return
 	}
 
 	switch classifyStatus(r) {
@@ -583,8 +586,8 @@ func analyzeIndexed(p Period, filter AnalyticsFilter) AnalyticsData {
 	stripe.Lock()
 	defer stripe.Unlock()
 	now := time.Now()
-	meta := dependencySignature(now)
-	snapshot := logSnapshotFor(true)
+	meta := usagePriceCacheKey(now)
+	snapshot := readLogSnapshot()
 
 	analyticsCache.Lock()
 	old := analyticsCache.states[key]
@@ -594,23 +597,8 @@ func analyzeIndexed(p Period, filter AnalyticsFilter) AnalyticsData {
 		return old.cloneResponse()
 	}
 
-	// Need full blocks for delta append or rebuild
-	if snapshot.uncached && len(snapshot.blocks) == 0 {
-		snapshot = readLogSnapshot()
-	}
 	priceOf := defaultPriceLookup()
 	renamed := provider.Renamed()
-
-	// If snapshot is still uncached (ledger exceeds requestCacheBytes):
-	// We stream accumulate without creating a full ledger slice, and we STILL cache the resulting state
-	// so subsequent calls with no new data hit the cache!
-	if snapshot.uncached {
-		state := buildNewAnalyticsState(p, filter, now, meta, snapshot, priceOf, renamed)
-		publishAnalyticsState(key, state, snapshot.version)
-		return state.cloneResponse()
-	}
-
-	// renamed already initialized above
 
 	// Check if we can do an incremental delta update:
 	// Must be same epoch, old.cursor > 0, same meta, and for Period All the timeline layout must not change!
@@ -992,8 +980,8 @@ func recentCallsIndexed(p Period, filter AnalyticsFilter, chartID string, limit 
 	stripe.Lock()
 	defer stripe.Unlock()
 	now := time.Now()
-	meta := dependencySignature(now)
-	snapshot := logSnapshotFor(true)
+	meta := usagePriceCacheKey(now)
+	snapshot := readLogSnapshot()
 
 	analyticsCache.Lock()
 	old := analyticsCache.calls[key]
@@ -1002,9 +990,6 @@ func recentCallsIndexed(p Period, filter AnalyticsFilter, chartID string, limit 
 		return formatCallsResponse(old.top50, limit), nil
 	}
 
-	if snapshot.uncached && len(snapshot.blocks) == 0 {
-		snapshot = readLogSnapshot()
-	}
 	priceOf := defaultPriceLookup()
 
 	renamed := provider.Renamed()

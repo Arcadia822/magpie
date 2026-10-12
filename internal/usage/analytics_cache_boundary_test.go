@@ -478,11 +478,11 @@ func TestAnalyticsBoundaryCompositeFilterAppendVsRebuildFullResponse(t *testing.
 	}
 }
 
-// 6. TestAnalyticsBoundaryRawCacheOverbudgetRetainsFinalResponseHit
-// Tests that when raw log caching exceeds budget (forcing uncached streaming for the raw ledger),
-// the final synthesized AnalyticsData response is still safely cached and hits on repeat calls
-// with bounded allocation (< 2000 allocs) without re-traversing the entire log.
-func TestAnalyticsBoundaryRawCacheOverbudgetRetainsFinalResponseHit(t *testing.T) {
+// 6. TestAnalyticsBoundaryTightBudgetRetainsFinalResponseHit
+// Under a retention budget well below this ledger's own index size, the
+// synthesized AnalyticsData response is still cached: repeat calls hit it with
+// bounded allocation (< 2000 allocs) instead of re-traversing 100k records.
+func TestAnalyticsBoundaryTightBudgetRetainsFinalResponseHit(t *testing.T) {
 	pageHome(t)
 	resetAnalyticsCache()
 
@@ -503,21 +503,15 @@ func TestAnalyticsBoundaryRawCacheOverbudgetRetainsFinalResponseHit(t *testing.T
 		})
 	}
 
-	// Measure actual raw snapshot bytes first with full budget, then set
-	// cacheBudget to half the raw ledger size (e.g. ~512KiB - 1MiB) so snapshot.uncached is guaranteed,
-	// while leaving ample room for analytics responses.
-	initialSnap := readLogSnapshot()
-	rawBytes := initialSnap.bytes
+	// Size the budget from the ledger's own index so this stays a fraction of
+	// the fixture rather than a hardcoded byte count. The analytics response
+	// budget is a quarter of it, leaving room for one response.
+	rawBytes := readLogSnapshot().bytes
 	if rawBytes/8 < 256<<10 {
 		t.Fatalf("fixture must exceed retained analytics state: raw bytes=%d", rawBytes)
 	}
 	cacheBudget(t, rawBytes/2)
 
-	snapshot := readLogSnapshot()
-	if !snapshot.uncached {
-		t.Fatalf("expected raw cache budget overflow to mark snapshot.uncached, got false (bytes=%d, budget=%d)",
-			snapshot.bytes, rawBytes/2)
-	}
 	first := Analyze(All, AnalyticsFilter{})
 	if first.Summary.Calls != count {
 		t.Fatalf("expected calls=%d, got %d", count, first.Summary.Calls)
@@ -538,7 +532,7 @@ func TestAnalyticsBoundaryRawCacheOverbudgetRetainsFinalResponseHit(t *testing.T
 
 // 7. TestAnalyticsBoundaryTimezoneSwitchInvalidatesDayWindowAndBuckets
 // Tests that switching time.Local invalidates the cached analytics state
-// across timezone boundaries via dependencySignature without needing an Append,
+// across timezone boundaries via usagePriceCacheKey without needing an Append,
 // updating bucket assignment and period boundaries for fixed records.
 func TestAnalyticsBoundaryTimezoneSwitchInvalidatesDayWindowAndBuckets(t *testing.T) {
 	pageHome(t)

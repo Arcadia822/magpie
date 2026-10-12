@@ -114,7 +114,7 @@ func TestAnalyticsNoDataNoOldTraversal(t *testing.T) {
 	writePerfJSONLLog(t, 4000)
 	first := Analyze(Month, AnalyticsFilter{})
 
-	// Measure allocations on exact cache hit (only cloneResponse + dependencySignature)
+	// Measure allocations on exact cache hit (only cloneResponse + usagePriceCacheKey)
 	allocs := testing.AllocsPerRun(10, func() {
 		_ = Analyze(Month, AnalyticsFilter{})
 	})
@@ -416,7 +416,7 @@ func Benchmark200kSuite(b *testing.B) {
 
 	// This fixture compresses to about 4.58 MiB and fits both budgets.
 	// Cold resets analytics state; it reuses the ledger index after its first build.
-	// Oversized ledger fallback is covered separately by the boundary regression.
+	// A tight retention budget is covered separately by the boundary regression.
 	n := 200_000
 	writePerfJSONLLog(b, n)
 
